@@ -1,14 +1,21 @@
 import { createLibp2p } from 'libp2p'
 import type { Libp2p } from 'libp2p'
 import type { PrivateKey } from '@libp2p/interface'
+import { MemoryBlockstore } from 'blockstore-core'
+import { MemoryDatastore } from 'datastore-core'
+import { createHelia, type HeliaLibp2p } from 'helia'
 import { createServerLibp2pOptions, type RelayListenOverrides } from './libp2p-server-config.js'
+import { attachLibp2pConnectionLogging, libp2pConnLogEnabledForRelay } from './libp2p-connection-log.js'
 import { BULK_MAX_CHUNK_BYTES } from './bulk-constants.js'
 import { CONNECTIVITY_BULK_PROTOCOL, CONNECTIVITY_ECHO_PROTOCOL } from './protocol.js'
 import { ByteStreamReader, encodeFrame, readFramedChunk } from './stream-binary.js'
 import { readLine, writeLine } from './stream-line.js'
 
+export type RelayHelia = HeliaLibp2p<Libp2p>
+
 export type RelayRuntime = {
   libp2p: Libp2p
+  helia: RelayHelia
   listenOverrides: RelayListenOverrides
   stop: () => Promise<void>
 }
@@ -64,19 +71,34 @@ function attachEchoHandler(libp2p: Libp2p): void {
 }
 
 export async function startRelayRuntime(privateKey: PrivateKey, overrides?: RelayListenOverrides): Promise<RelayRuntime> {
-  const libp2p = await createLibp2p(
-    createServerLibp2pOptions(privateKey, overrides) as Parameters<typeof createLibp2p>[0]
-  )
+  const libp2pOptions = {
+    ...(createServerLibp2pOptions(privateKey, overrides) as Record<string, unknown>),
+    start: false,
+  } as Parameters<typeof createLibp2p>[0]
+
+  const libp2p = await createLibp2p(libp2pOptions)
+  if (libp2pConnLogEnabledForRelay()) {
+    attachLibp2pConnectionLogging(libp2p, '[relay libp2p]')
+    console.log('[relay libp2p] connection logging on (LIBP2P_CONN_LOG or RELAY_LIBP2P_CONN_LOG)')
+  }
   attachEchoHandler(libp2p)
   attachBulkHandler(libp2p)
-  await libp2p.start()
+
+  const helia = await createHelia<typeof libp2p>({
+    libp2p,
+    blockstore: new MemoryBlockstore(),
+    datastore: new MemoryDatastore(),
+    start: false,
+  })
+  await helia.start()
 
   return {
     libp2p,
+    helia,
     listenOverrides: overrides ?? {},
     stop: async () => {
       try {
-        await libp2p.stop()
+        await helia.stop()
       } catch {
         // ignore
       }
@@ -95,4 +117,7 @@ export function logRelayBanner(libp2p: Libp2p): void {
     'Dial one of the above from the client (include /p2p/<peerId> for remote hosts). Transports: TCP, WebSocket (cleartext WS + Noise; not WSS/AutoTLS), QUIC (/quic-v1 UDP), WebRTC-Direct (/webrtc-direct + certhash).'
   )
   console.log('Protocols:', CONNECTIVITY_ECHO_PROTOCOL, CONNECTIVITY_BULK_PROTOCOL)
+  console.log(
+    'Helia: bitswap + unixfs on the same libp2p node (GET /ipfs/<cid> when RELAY_IPFS_GATEWAY=1 on control HTTP, or standalone RELAY_IPFS_HTTP_PORT).'
+  )
 }

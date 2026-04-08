@@ -15,6 +15,14 @@ Environment=RELAY_QUIC_PORT=5000
 Environment=RELAY_WEBRTC_PORT=3478
 Environment=RELAY_KEY_FILE=/var/lib/helia-connectivity-lab/peer.key
 Environment=RELAY_CONTROL_HTTP_PORT=8008
+# Optional: GET /ipfs/<cid> on the same HTTP port as control (/health, /status).
+# Environment=RELAY_IPFS_GATEWAY=1
+# Environment=RELAY_IPFS_GATEWAY_LOG=1
+# Environment=LIBP2P_CONN_LOG=1
+# Standalone gateway only if control HTTP is disabled (port must not be RELAY_WS_PORT):
+# Environment=RELAY_IPFS_HTTP_PORT=8444
+# Environment=RELAY_IPFS_TLS_CERT=/path/to/fullchain.pem
+# Environment=RELAY_IPFS_TLS_KEY=/path/to/privkey.pem
 # Token: set RELAY_CONTROL_TOKEN only in /etc/default/helia-connectivity-lab — systemd applies EnvironmentFile after Environment= and overrides the same key.
 EnvironmentFile=-/etc/default/helia-connectivity-lab
 ExecStart=/usr/bin/node dist/server.js

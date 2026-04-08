@@ -2,7 +2,7 @@
 
 Phase 1: minimal **libp2p** connectivity check between a **relay + echo server** and a **desktop CLI client**. The server runs **circuit relay v2** (`circuitRelayServer`) and two custom protocols: **`/connectivity-echo/1.0.0`** (one-line echo) and **`/connectivity-bulk/1.0.0`** (length-prefixed random payloads echoed back for sustained load tests).
 
-Later phases (not implemented here yet): Helia + UnixFS CID fetch, HTTP `GET /ipfs/<cid>`, browser client.
+The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in-memory blockstore). Optionally expose **`GET /ipfs/<cid>`** over HTTP(S) so the VPS can **`unixfs.cat`** a CID from the network (e.g. a laptop that dialed in on TCP / WS / QUIC / WebRTC like the rest of the lab). Browser client remains future work.
 
 ## TLS / AutoTLS vs what this lab uses
 
@@ -37,7 +37,7 @@ Enable a small **Node HTTP** control server (plain HTTP, separate from libp2p):
 
 Endpoints:
 
-- **`GET /health`** — no auth; `{"status":"ok","control":true}`.
+- **`GET /health`** — no auth; `{"status":"ok","control":true}` (and **`"ipfsGateway":true`** when **`RELAY_IPFS_GATEWAY=1`** — see [IPFS gateway](#optional-ipfs-http-gateway-same-libp2p-as-the-relay)).
 - **`GET /status`** — requires auth; returns `peerId`, active `listenOverrides`, and `multiaddrs`.
 - **`POST /run/tcp/<port>`** — schedules a libp2p stop/start with TCP bound to `<port>`. Responds **`202 Accepted`** with JSON **before** the restart finishes (so slow or crashy restarts do not produce an empty HTTP reply). **Poll `GET /status`** for the new `multiaddrs`. **PeerId stays the same** if you use `RELAY_PRIVATE_KEY_HEX` or `RELAY_KEY_FILE` (recommended on a VPS).
 - **`POST /run/ws/<port>`** — same for the **WebSocket** listener port.
@@ -62,6 +62,115 @@ curl -sS -H "Authorization: Bearer $RELAY_CONTROL_TOKEN" "http://YOUR_HOST:8008/
 ```
 
 **Security:** anyone who can reach the control port and guess the token can rebind listeners. Prefer binding control to **localhost** and using SSH port-forwarding, or firewall the control port to your IP only, and use a long random token.
+
+## Optional IPFS HTTP gateway (same libp2p as the relay)
+
+When the **control HTTP API** is enabled (**`RELAY_CONTROL_HTTP_PORT`** + **`RELAY_CONTROL_TOKEN`**), **`GET /ipfs/<cid>`** is served on the **same TCP port** as **`GET /health`** and **`GET /status`** — no second HTTP listener. **`GET /ipfs/...` does not require auth** (public read); **`GET /status`** and **`POST /run/...`** still need the Bearer token.
+
+- **`GET /ipfs/<cid>`** — streams **`unixfs.cat`** via **Helia** (bitswap) on the relay’s libp2p node.
+- **`GET /health`** — if the IPFS gateway is enabled, body includes both flags, e.g. `{"status":"ok","control":true,"ipfsGateway":true}`; otherwise `{"status":"ok","control":true}`.
+
+| Variable | Meaning |
+|----------|---------|
+| `RELAY_IPFS_GATEWAY` | Set to **`1`** or **`true`** to enable **`/ipfs/<cid>`** on the **control HTTP** port (recommended). |
+| `RELAY_IPFS_HTTP_PORT` | **Legacy / fallback:** if the control API is **disabled**, a **standalone** gateway can listen on this port (must differ from **`RELAY_WS_PORT`** TCP port). If control HTTP is **enabled**, this value is **not** used for binding (routes are on the control port). Alias: `IPFS_HTTP_PORT`. |
+| `RELAY_IPFS_HTTP_HOST` | Bind host for **standalone** mode only (default `0.0.0.0`). Alias: `IPFS_HTTP_HOST`. |
+| `RELAY_IPFS_TLS_CERT` / `RELAY_IPFS_TLS_KEY` | PEM paths for **standalone** HTTPS only (control plane stays plain HTTP unless you terminate TLS elsewhere). |
+| `RELAY_IPFS_CAT_TIMEOUT_MS` | Max time for a single `cat` stream (default **120000**). |
+| `RELAY_IPFS_GATEWAY_LOG` | Set to **`1`** or **`true`** to log each **`/ipfs/<cid>`** to stderr / journal: `cat start`, **`cat progress`**, **`cat done`** / **`cat error`**. Also logs **`GET /health`** when the gateway is enabled. |
+| `RELAY_IPFS_GATEWAY_LOG_PROGRESS_BYTES` | Bytes between **`cat progress`** lines (default **262144**). **`0`** = only start/done/error. |
+
+**libp2p connection visibility (optional):**
+
+| Variable | Where | Meaning |
+|----------|-------|---------|
+| `LIBP2P_CONN_LOG=1` | **VPS** | `connection:open` / `close`, `peer:connect` / `disconnect` (peer id, direction, remote multiaddr, mux, encryption). Alias: `RELAY_LIBP2P_CONN_LOG=1`. |
+| _(default on)_ | **`helia-laptop-provide`** | Same on stderr (`[laptop-provide]`). Disable with **`HELIA_LAPTOP_CONN_LOG=0`**. |
+
+Open your **control HTTP** port in the **firewall** if you need **`/ipfs`** from the internet (same port as **`/status`**). **Control-plane restarts** replace the in-process Helia instance; the HTTP server keeps running and uses the current runtime per request.
+
+### Laptop to VPS: Helia file over HTTP and bitswap
+
+**Idea:** the **laptop** runs Helia, **dials the relay** on libp2p (e.g. TCP **81**), **adds** a file, and stays running. The **VPS relay** serves **`GET /ipfs/<cid>`** on the **control HTTP port**; Helia on the VPS **bitswaps** blocks from the laptop over that libp2p connection. The machine that runs **`curl`** only needs HTTP access to the VPS; it does **not** need to be the laptop—but the **laptop provider must stay up** until the download finishes.
+
+**VPS prerequisites (environment, e.g. `/etc/default/helia-connectivity-lab`):**
+
+- **`RELAY_CONTROL_HTTP_PORT`** and **`RELAY_CONTROL_TOKEN`** (control API on).
+- **`RELAY_IPFS_GATEWAY=1`** so **`/ipfs/<cid>`** is mounted on that same HTTP port.
+- Optional: **`RELAY_IPFS_GATEWAY_LOG=1`**, **`LIBP2P_CONN_LOG=1`** (see [Viewing logs on the VPS](#viewing-logs-on-the-vps)).
+- Firewall: **libp2p TCP** (e.g. **81**) from the internet so the laptop can dial; **control HTTP port** (e.g. **88**) if you **`curl`** from outside.
+
+**Steps (order matters):**
+
+1. **VPS — follow logs** (SSH session; see section below):  
+   `journalctl -u helia-connectivity-lab -f`  
+   Leave this running so you see **`[relay libp2p]`** connection lines and **`[ipfs-gateway]`** `cat start` / `cat done` or errors.
+
+2. **Laptop — provider** (second terminal; repo root, after `npm run build`):
+
+```bash
+npm run helia:laptop-provide -- \
+  '/ip4/<VPS_PUBLIC_IP>/tcp/<LIBP2P_TCP_PORT>/p2p/<RELAY_PEER_ID>' \
+  /path/to/file.jpg
+```
+
+Use the **relay’s public IPv4** and the **TCP port** the relay listens on (often **81**). **`PeerId`** must match the relay (from **`GET /status`** or server boot log). Wait for **`Dial OK`** and copy the printed **UnixFS CID**. **Do not press Ctrl+C** until the download is done.
+
+3. **Fetch over HTTP** (third terminal or any host that reaches the VPS control port). Prefer **no HTTP proxy** so debugging matches the server logs:
+
+```bash
+curl --noproxy '*' -v --progress-bar -o /tmp/out.jpg \
+  "http://<VPS_HOST_OR_IP>:<CONTROL_HTTP_PORT>/ipfs/<CID_FROM_STEP_2>"
+curl -sS "http://<VPS_HOST_OR_IP>:<CONTROL_HTTP_PORT>/health"
+```
+
+Example host **`libp2p.le-space.de`**, control port **88**:  
+`http://libp2p.le-space.de:88/ipfs/bafy...`
+
+4. **Success:** laptop stderr shows **`[laptop-provide]`** `connection:open` **outbound**; VPS journal shows **inbound** `connection:open` and **`[ipfs-gateway] cat done`** with **`bytes=`** matching the file size. **`curl`** exits 0 and the output file grows.
+
+**If `cat` times out (`bytesSent=0`, errors like “All promises were rejected”):** bitswap got no blocks—usually the **provider exited**, the **libp2p connection dropped**, or **`curl` used an HTTP proxy** (server log may show `client=…:3128`; that is unrelated to libp2p). Confirm with **`LIBP2P_CONN_LOG`** on both sides that the peer is still connected when **`curl`** runs.
+
+**Standalone gateway (no control API):** set **`RELAY_IPFS_HTTP_PORT`** to a free TCP port (not the WebSocket listener port). With TLS PEM paths, use **`https://`** for that standalone port.
+
+```bash
+curl -sS -o downloaded.txt "https://relay.example.com:<STANDALONE_PORT>/ipfs/bafy..."
+```
+
+### Viewing logs on the VPS
+
+These commands use **systemd**’s **`journalctl`**. They run **on the VPS** (Linux), not on macOS.
+
+**SSH into the VPS, then:**
+
+```bash
+# Live follow (Ctrl+C to stop)
+journalctl -u helia-connectivity-lab -f
+
+# Last 80 lines
+journalctl -u helia-connectivity-lab -n 80 --no-pager
+
+# Since the last 15 minutes
+journalctl -u helia-connectivity-lab --since "15 min ago" --no-pager
+```
+
+**From your laptop without an interactive shell:**
+
+```bash
+ssh root@YOUR_VPS 'journalctl -u helia-connectivity-lab -f'
+```
+
+**Filter to IPFS gateway lines only (on the VPS):**
+
+```bash
+journalctl -u helia-connectivity-lab -f | grep ipfs-gateway
+```
+
+**What to look for**
+
+- **`[relay libp2p]`** — libp2p **`connection:open`** / **`peer:connect`** when the laptop dials.
+- **`[ipfs-gateway]`** — **`cat start`**, **`cat progress`**, **`cat done`** or **`cat error`** for each **`GET /ipfs/<cid>`** (when **`RELAY_IPFS_GATEWAY_LOG=1`**).
+- Boot lines: **Control HTTP listening**, **GET /ipfs/<cid>**, relay **PeerId** and **multiaddrs**.
 
 **401 Unauthorized with a “correct” token:** systemd applies **`EnvironmentFile=` after `Environment=`** and **overrides the same variable name**. If both the unit file and **`/etc/default/helia-connectivity-lab`** set `RELAY_CONTROL_TOKEN`, the **file wins**—the process will not use the token in the unit. Put the token in **one place only** (recommended: `/etc/default/helia-connectivity-lab`). Also use **`GET /status`** (not `POST`); `POST` is only for `/run/...`.
 
@@ -224,12 +333,46 @@ A reference unit file lives at [deploy/helia-connectivity-lab.service](deploy/he
 - **Server → client:** same frame echoed back after each read.
 - One libp2p stream uses a **single** `sink()` async generator (yield frame, await echo) so the writable half is only consumed once.
 
+## Helia / IPFS (libp2p 2.x only)
+
+**Do not use current `helia@6`** on npm: it pulls **`libp2p@^3`**. This repo stays on **`libp2p@^2.10`** like the rest of the lab.
+
+**Pinned stack (same band as [`orbitdb-relay-pinner`](https://github.com/NiKrause/orbitdb-relay-pinner)):**
+
+| Package | Version | Notes |
+|---------|---------|--------|
+| `helia` | **5.3.0** | Works with libp2p 2.x |
+| `@helia/unixfs` | **5.1.0** | UnixFS add / cat |
+| `blockstore-core` / `datastore-core` | **5.x / 10.x** | In-memory stores in tests |
+| `multiformats` | **13.4.x** | CID parsing |
+| `libp2p` | **^2.10.0** | Unchanged |
+
+**`overrides.it-length-prefixed`** matches the relay-pinner repo to avoid duplicate incompatible copies.
+
+### Phase 2A — local two-node round-trip
+
+Two default Helia nodes on loopback; peer 2 dials peer 1; add bytes on 1; `cat` the same CID on 2 (bitswap).
+
+```bash
+npm run test:helia:local
+```
+
+### Phase 2B — remote fetch (your laptop → VPS peer)
+
+After a **remote** Helia/libp2p peer holds the data, fetch by **full multiaddr** + **CID**:
+
+```bash
+npm run test:helia:remote -- '/ip4/95.217.163.72/tcp/81/p2p/12D3KooW...' bafkrei...
+```
+
+The **relay process** embeds **Helia** on the **same** libp2p stack as echo/bulk. Step-by-step **laptop to VPS** test (**`helia:laptop-provide`**, **`curl /ipfs/<cid>`**, **journalctl**) is in [Laptop to VPS: Helia file over HTTP and bitswap](#laptop-to-vps-helia-file-over-http-and-bitswap) and [Viewing logs on the VPS](#viewing-logs-on-the-vps). For a full pinning product, **`orbitdb-relay-pinner`** remains the richer reference.
+
 ## Roadmap
 
 1. **Phase 1 (this repo):** libp2p dial + stream echo + **bulk** sustained transfer; relay server enabled; TCP, WS, QUIC, WebRTC-Direct.
 2. **Phase 1b:** **Done in repo** — **`@chainsafe/libp2p-quic@1.1.8`** + `/udp/.../quic-v1`. Optional future: **`@chainsafe/libp2p-quic@2.x`** if you migrate to **libp2p 3.x**.
-3. **Phase 2:** Add `helia` + `@helia/unixfs`; publish a small text blob from the client; fetch on the server via the network (bitswap/DHT), still without HTTP.
-4. **Phase 3:** Optional HTTP server on the server: `GET /ipfs/<cid>` backed by Helia `unixfs.cat` over the network.
+3. **Phase 2:** **Done in repo** — Helia **5.3** + `@helia/unixfs` **5.1**: **2A** local round-trip; **2B** remote `cat` CLI; **relay + Helia** in one process; optional **`GET /ipfs/<cid>`** HTTP(S) gateway.
+4. **Phase 3:** Hardening / ops (rate limits, auth on `/ipfs`, metrics, persistent blockstore if needed).
 5. **Phase 4:** Browser bundle (e.g. Vite) with WebSockets/WebRTC; same echo or `/ipfs` flow with CORS on the HTTP API.
 
 ## License

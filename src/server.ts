@@ -2,6 +2,7 @@ import type { RelayRuntime } from './relay-runtime.js'
 import { logRelayBanner, startRelayRuntime } from './relay-runtime.js'
 import { loadOrGenerateRelayPrivateKey } from './relay-key.js'
 import { startControlHttpServer } from './control-http.js'
+import { readIpfsGatewayFeatureConfig, startIpfsHttpGateway } from './ipfs-http-gateway.js'
 import type { RelayListenOverrides } from './libp2p-server-config.js'
 
 async function main() {
@@ -24,9 +25,19 @@ async function main() {
     },
   })
 
+  const ipfsFeature = readIpfsGatewayFeatureConfig()
+  const ipfsGateway = startIpfsHttpGateway(() => runtime, {
+    mountOnControl: control.started && ipfsFeature.enabled,
+  })
+
   const shutdown = async () => {
     try {
       await control.close()
+    } catch {
+      // ignore
+    }
+    try {
+      await ipfsGateway.close()
     } catch {
       // ignore
     }

@@ -3,6 +3,11 @@ import type { RelayRuntime } from './relay-runtime.js'
 import { logRelayBanner, startRelayRuntime } from './relay-runtime.js'
 import type { PrivateKey } from '@libp2p/interface'
 import type { RelayListenOverrides } from './libp2p-server-config.js'
+import {
+  clientLabel,
+  readIpfsGatewayFeatureConfig,
+  tryServeIpfsCat,
+} from './ipfs-http-gateway.js'
 
 function readControlConfig() {
   const port = Number(process.env.RELAY_CONTROL_HTTP_PORT || process.env.CONTROL_HTTP_PORT || '')
@@ -63,6 +68,8 @@ function parseRunPath(pathname: string): { kind: 'tcp' | 'ws' | 'quic' | 'webrtc
 
 export type ControlHttpServer = {
   close: () => Promise<void>
+  /** False when RELAY_CONTROL_HTTP_PORT unset, invalid, or RELAY_CONTROL_TOKEN empty. */
+  started: boolean
 }
 
 /**
@@ -84,15 +91,23 @@ export function startControlHttpServer(opts: {
   getOverrides: () => RelayListenOverrides
   setOverrides: (o: RelayListenOverrides) => void
 }): ControlHttpServer {
+  const noop = { close: async () => {}, started: false as const }
   const cfg = readControlConfig()
   if (!cfg.enabled) {
-    return { close: async () => {} }
+    return noop
   }
   if (!cfg.token) {
     console.warn(
       'RELAY_CONTROL_HTTP_PORT is set but RELAY_CONTROL_TOKEN is empty — control API disabled (set a strong token).'
     )
-    return { close: async () => {} }
+    return noop
+  }
+
+  const ipfsFeature = readIpfsGatewayFeatureConfig()
+  const ipfsHandlerCfg = {
+    catTimeoutMs: ipfsFeature.catTimeoutMs,
+    log: ipfsFeature.log,
+    logProgressBytes: ipfsFeature.logProgressBytes,
   }
 
   let serialQueue: Promise<unknown> = Promise.resolve()
@@ -119,7 +134,20 @@ export function startControlHttpServer(opts: {
     }
 
     if (req.method === 'GET' && pathname === '/health') {
-      sendJson(res, 200, { status: 'ok', control: true })
+      if (ipfsFeature.enabled && ipfsFeature.log) {
+        console.log(`[ipfs-gateway] GET /health  client=${clientLabel(req)}`)
+      }
+      sendJson(
+        res,
+        200,
+        ipfsFeature.enabled
+          ? { status: 'ok', control: true, ipfsGateway: true }
+          : { status: 'ok', control: true }
+      )
+      return
+    }
+
+    if (ipfsFeature.enabled && (await tryServeIpfsCat(req, res, opts.getRuntime, ipfsHandlerCfg))) {
       return
     }
 
@@ -207,9 +235,18 @@ export function startControlHttpServer(opts: {
       '  POST /run/tcp|ws|quic|webrtc|webrtc-direct/<port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)'
     )
     console.log('  GET /health  GET /status (auth)')
+    if (ipfsFeature.enabled) {
+      console.log('  GET /ipfs/<cid>  (no auth — Helia unixfs.cat / bitswap on same libp2p as relay)')
+      if (ipfsFeature.log) {
+        console.log(
+          '[ipfs-gateway] RELAY_IPFS_GATEWAY_LOG is on — per-request lines in journal (journalctl -u helia-connectivity-lab -f)'
+        )
+      }
+    }
   })
 
   return {
+    started: true,
     close: () =>
       new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
