@@ -12,7 +12,8 @@
     "server": "node dist/server.js",
     "client": "node dist/client.js",
     "start:server": "npm run build && npm run server",
-    "start:client": "npm run build && npm run client"
+    "start:client": "npm run build && npm run client",
+    "test:transports": "npm run build && node dist/transport-matrix.js"
   },
   "dependencies": {
     "@chainsafe/libp2p-noise": "^16.1.4",

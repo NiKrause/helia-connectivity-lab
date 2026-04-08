@@ -1,9 +1,4 @@
-import { createLibp2p } from 'libp2p'
-import { generateKeyPair } from '@libp2p/crypto/keys'
-import { multiaddr } from '@multiformats/multiaddr'
-import { createClientLibp2pOptions } from './libp2p-client-config.js'
-import { CONNECTIVITY_ECHO_PROTOCOL } from './protocol.js'
-import { readLine, writeLine } from './stream-line.js'
+import { dialEchoOnce } from './echo-dial.js'
 
 function usage(): never {
   console.error(`Usage:
@@ -41,30 +36,8 @@ async function main() {
 
   if (!relayAddrStr) usage()
 
-  const privateKey = await generateKeyPair('Ed25519')
-  const libp2p = await createLibp2p(createClientLibp2pOptions(privateKey) as Parameters<typeof createLibp2p>[0])
-
-  await libp2p.start()
-
-  const relayMa = multiaddr(relayAddrStr)
-
-  try {
-    await libp2p.dial(relayMa)
-    const stream = await libp2p.dialProtocol(relayMa, CONNECTIVITY_ECHO_PROTOCOL)
-    try {
-      await writeLine(stream, message)
-      const reply = await readLine(stream)
-      console.log(reply)
-    } finally {
-      try {
-        await stream.close()
-      } catch {
-        // ignore
-      }
-    }
-  } finally {
-    await libp2p.stop()
-  }
+  const reply = await dialEchoOnce(relayAddrStr, message)
+  console.log(reply)
 }
 
 main().catch((e) => {

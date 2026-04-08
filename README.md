@@ -120,6 +120,32 @@ RELAY_MULTIADDR='/ip4/203.0.113.10/tcp/9092/ws/p2p/12D3KooW...' npm run client -
 
 If the client should not load WebRTC (e.g. TCP/WS-only test): `CLIENT_DISABLE_WEBRTC=true`.
 
+## Repeatable transport matrix (VPN vs non-VPN)
+
+Script: **`npm run test:transports`** — calls control **`GET /status`**, picks one multiaddr per transport (**TCP**, **WebSocket**, **QUIC**, **WebRTC-Direct**) for your **dial host**, runs the echo protocol, and **appends** a block to a text file (default **`transport-test-results.txt`** in the current directory; listed in `.gitignore`).
+
+| Env / flag | Meaning |
+|------------|---------|
+| `RELAY_CONTROL_BASE` or `--base` | e.g. `http://95.217.163.72:8008` |
+| `RELAY_CONTROL_TOKEN` or `--token` | Bearer token for `/status` |
+| `RELAY_DIAL_HOST` or `--dial` | Public **IP or DNS** used to choose which advertised multiaddrs to dial (e.g. `95.217.163.72`). If `--base` uses a numeric IP, this defaults to that IP. |
+| First positional | **Label** for the run (logged in the file; also the default **echo** payload). |
+| `--out FILE` | Append to this file instead (e.g. `--out ~/vpn-comparison.txt`). |
+| `--message TEXT` | Override the echo string (default: same as the label). |
+
+**Examples** (run twice: once with Nym off, once with Nym on, same `--out` to accumulate):
+
+```bash
+export RELAY_CONTROL_BASE=http://95.217.163.72:8008
+export RELAY_CONTROL_TOKEN='your-token'
+export RELAY_DIAL_HOST=95.217.163.72
+
+npm run test:transports -- "run-without-vpn" --out ./transport-runs.txt
+npm run test:transports -- "run-with-nym-vpn" --out ./transport-runs.txt
+```
+
+Requires server ports matching your deployment (e.g. Nym-friendly **81 / 8080 / 5000 / 3478** from [deploy/helia-connectivity-lab.service](deploy/helia-connectivity-lab.service)).
+
 ## Deploying to a VPS (e.g. `libp2p.le-space.de`)
 
 From your laptop (with SSH access), sync sources and install on the server:
