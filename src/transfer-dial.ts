@@ -3,6 +3,7 @@ import { createLibp2p } from 'libp2p'
 import { generateKeyPair } from '@libp2p/crypto/keys'
 import { multiaddr } from '@multiformats/multiaddr'
 import { equals } from 'uint8arrays/equals'
+import { assertDialablePeerMultiaddr } from './peer-multiaddr-validate.js'
 import { createClientLibp2pOptions } from './libp2p-client-config.js'
 import {
   BULK_DEFAULT_MAX_CHUNK,
@@ -66,6 +67,7 @@ export async function dialBulkTransfer(
   const libp2p = await createLibp2p(createClientLibp2pOptions(privateKey) as Parameters<typeof createLibp2p>[0])
   await libp2p.start()
   const relayMa = multiaddr(multiaddrStr)
+  assertDialablePeerMultiaddr(relayMa)
 
   const started = Date.now()
   const hardDeadline = started + durationMs + graceMs
