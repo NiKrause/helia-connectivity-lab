@@ -5,3 +5,4 @@ dist/
 transport-test-results.txt
 transport-runs.txt
 .relay-status.json
+libp2p-autotls-data/

@@ -3,10 +3,13 @@ import { yamux } from '@chainsafe/libp2p-yamux'
 import { quic } from '@chainsafe/libp2p-quic'
 import { circuitRelayTransport, circuitRelayServer } from '@libp2p/circuit-relay-v2'
 import { identify, identifyPush } from '@libp2p/identify'
+import { keychain } from '@libp2p/keychain'
 import { webRTCDirect } from '@libp2p/webrtc'
 import { tcp } from '@libp2p/tcp'
 import { webSockets } from '@libp2p/websockets'
+import { autoTLS } from '@ipshipyard/libp2p-auto-tls'
 import type { PrivateKey } from '@libp2p/interface'
+import type { Datastore } from 'interface-datastore'
 
 export type RelayListenEnv = {
   tcpPort: number
@@ -20,6 +23,19 @@ export type RelayListenEnv = {
 }
 
 export type RelayListenOverrides = Partial<RelayListenEnv>
+
+/** When true, libp2p needs a persistent `datastore` (Level) + `keychain` + `autoTLS` services. */
+export function readRelayAutoTlsEnabled(): boolean {
+  const v = (process.env.RELAY_AUTO_TLS || '').toLowerCase()
+  return v === '1' || v === 'true'
+}
+
+/** Comma-separated full multiaddrs (no spaces), e.g. `/ip4/PUBLIC/tcp/81,/ip4/PUBLIC/tcp/8443/ws` — helps AutoTLS and clients when listen addrs are loopback-only behind NAT. */
+export function readRelayAppendAnnounce(): string[] {
+  const raw = process.env.RELAY_APPEND_ANNOUNCE?.trim()
+  if (!raw) return []
+  return raw.split(',').map((s) => s.trim()).filter(Boolean)
+}
 
 export function readListenEnv(): RelayListenEnv {
   const tcpPort = Number(process.env.RELAY_TCP_PORT || 9091)
@@ -36,8 +52,18 @@ export function readListenEnv(): RelayListenEnv {
   return { tcpPort, wsPort, quicPort, webrtcPort, listenIpv4, disableIpv6, disableWebRtc, disableQuic }
 }
 
-export function createServerLibp2pOptions(privateKey: PrivateKey, overrides?: RelayListenOverrides): Record<string, unknown> {
+export function createServerLibp2pOptions(
+  privateKey: PrivateKey,
+  overrides?: RelayListenOverrides,
+  libp2pDatastore?: Datastore
+): Record<string, unknown> {
   const e = { ...readListenEnv(), ...overrides }
+  const autoTls = readRelayAutoTlsEnabled()
+  if (autoTls && libp2pDatastore == null) {
+    throw new Error(
+      'RELAY_AUTO_TLS=1 requires a persistent libp2p datastore. Set RELAY_AUTO_TLS_DATASTORE_PATH to a directory (e.g. /var/lib/helia-connectivity-lab/libp2p-datastore).'
+    )
+  }
 
   const listen: string[] = [
     `/ip4/${e.listenIpv4}/tcp/${e.tcpPort}`,
@@ -67,9 +93,18 @@ export function createServerLibp2pOptions(privateKey: PrivateKey, overrides?: Re
     ...(!e.disableWebRtc ? [webRTCDirect()] : []),
   ]
 
+  const staging =
+    process.env.RELAY_AUTO_TLS_STAGING === '1' || process.env.RELAY_AUTO_TLS_STAGING === 'true'
+
+  const appendAnnounce = readRelayAppendAnnounce()
+
   return {
     privateKey,
-    addresses: { listen },
+    ...(libp2pDatastore != null ? { datastore: libp2pDatastore } : {}),
+    addresses: {
+      listen,
+      ...(appendAnnounce.length > 0 ? { appendAnnounce } : {}),
+    },
     transports,
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
@@ -85,6 +120,17 @@ export function createServerLibp2pOptions(privateKey: PrivateKey, overrides?: Re
           defaultDurationLimit: 120_000,
         },
       }),
+      ...(autoTls && libp2pDatastore != null
+        ? {
+            keychain: keychain(),
+            autoTLS: autoTLS({
+              autoConfirmAddress: true,
+              ...(staging
+                ? { acmeDirectory: 'https://acme-staging-v02.api.letsencrypt.org/directory' }
+                : {}),
+            }),
+          }
+        : {}),
     },
     connectionGater: {
       denyDialMultiaddr: async () => false,

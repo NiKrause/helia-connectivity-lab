@@ -4,17 +4,20 @@ Phase 1: minimal **libp2p** connectivity check between a **relay + echo server**
 
 The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in-memory blockstore). Optionally expose **`GET /ipfs/<cid>`** over HTTP(S) so the VPS can **`unixfs.cat`** a CID from the network (e.g. a laptop that dialed in on TCP / WS / QUIC / WebRTC like the rest of the lab). Browser client remains future work.
 
-## TLS / AutoTLS vs what this lab uses
+## TLS / AutoTLS vs cleartext WebSocket
 
-- **This project does not use AutoTLS or WSS.** The WebSocket transport listens on **`ws://` (cleartext)**. The libp2p stack still negotiates **Noise** on top of the socket, so the libp2p session is encrypted and authenticated—this is **not** the same as browser-grade `wss://` + public PKI.
-- **AutoTLS** (as in [orbitdb-relay-pinner](https://github.com/NiKrause/orbitdb-relay-pinner) with `@ipshipyard/libp2p-auto-tls`) provisions TLS certs so **`wss://`** and HTTPS endpoints can use normal TLS hostnames. That is **not** wired here; add it only if you need WSS/HTTPS interop.
+- **Default:** the WebSocket transport listens on **`ws://` (cleartext TCP)**. **Noise** still encrypts the libp2p session on top—this is **not** browser-style **`wss://`** with public PKI.
+- **Optional AutoTLS:** set **`RELAY_AUTO_TLS=1`** and a writable **`RELAY_AUTO_TLS_DATASTORE_PATH`** (LevelDB dir for certs/keys, e.g. under `/var/lib/...`). The relay loads [**`@ipshipyard/libp2p-auto-tls`**](https://www.npmjs.com/package/@ipshipyard/libp2p-auto-tls) plus **`@libp2p/keychain`**, same idea as [orbitdb-relay-pinner](https://github.com/NiKrause/orbitdb-relay-pinner). After the node is **publicly reachable** on the WS port, announced multiaddrs can include **`/tls/ws`** (Let’s Encrypt via **libp2p.direct**). **`autoConfirmAddress: true`** is set so a VPS with a stable public IP does not wait indefinitely for peer confirmation.
+- **`RELAY_AUTO_TLS_STAGING=1`** uses Let’s Encrypt **staging** (avoid rate limits while testing).
+- If **`Listen addresses`** only show **`127.0.0.1`** (relay behind port forwarding), set **`RELAY_APPEND_ANNOUNCE`** to your **public** TCP and cleartext WS multiaddrs (comma-separated, no spaces) so AutoTLS and **`GET /status`** expose routable addresses.
+- **Clients** that want TLS must dial the **`/tls/ws`** multiaddr from **`GET /status`**, not only the cleartext `/ws` line.
 
 ## Transports you can test (no WebTransport)
 
 | Transport        | Multiaddr shape (after `/p2p/<peerId>`) | Notes |
 |-----------------|----------------------------------------|--------|
 | **TCP**         | `/ip4/<host>/tcp/<port>/p2p/<peerId>` | Simplest for VPS + firewall. |
-| **WebSocket**   | `/ip4/<host>/tcp/<port>/ws/p2p/<peerId>` | Cleartext **WS** + Noise (see above). |
+| **WebSocket**   | `/ip4/<host>/tcp/<port>/ws/p2p/<peerId>` | Cleartext **WS** + Noise (see above). With **AutoTLS**, also **`/tcp/.../tls/ws/p2p/...`** (TLS WebSocket). |
 | **WebRTC-Direct** | `/ip4/<host>/udp/<port>/webrtc-direct/certhash/.../p2p/<peerId>` | Copy **full** addr from server output (includes `certhash`). UDP port must be open. |
 | **QUIC**        | `/ip4/<host>/udp/<port>/quic-v1/p2p/<peerId>` | **`@chainsafe/libp2p-quic@1.1.8`** with **libp2p 2.x**. Default **`RELAY_QUIC_PORT=5000`** matches Nym **`ExitPolicy accept *:5000-5005`**. Nym’s published policy is **TCP-oriented**; **UDP** to your server may still depend on the VPN path—test from your client. |
 
@@ -214,8 +217,12 @@ RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_QUIC_PORT=5000 RELAY_WEBRTC_PORT=90
 | `RELAY_LISTEN_IPV4` | `0.0.0.0` | IPv4 bind address |
 | `RELAY_DISABLE_IPV6` | unset | Set to `true` or `1` to skip IPv6 listeners |
 | `RELAY_DISABLE_WEBRTC` | unset | Set to `true` or `1` to disable WebRTC-Direct |
+| `RELAY_AUTO_TLS` | unset | Set to **`1`** to enable **`@ipshipyard/libp2p-auto-tls`** (needs **`RELAY_AUTO_TLS_DATASTORE_PATH`**). |
+| `RELAY_AUTO_TLS_DATASTORE_PATH` | `./libp2p-autotls-data` | Writable directory for LevelDB (certs). Use e.g. **`/var/lib/helia-connectivity-lab/libp2p-datastore`** on a VPS. |
+| `RELAY_AUTO_TLS_STAGING` | unset | Set to **`1`** for Let’s Encrypt **staging** ACME. |
+| `RELAY_APPEND_ANNOUNCE` | unset | Comma-separated multiaddrs **without spaces** to **append** as announced addresses (e.g. public **`/ip4/x/tcp/81`** and **`/ip4/x/tcp/8443/ws`** when the process listens on loopback behind port forwarding). Helps **`GET /status`** and **AutoTLS** see a publicly dialable WS address. |
 
-On start, the server prints **PeerId** and **dialable multiaddrs**. Pick the line that matches the transport you want to test (TCP, `/ws`, or `/webrtc-direct/.../certhash/...`).
+On start, the server prints **PeerId** and **dialable multiaddrs**. Pick the line that matches the transport you want to test (TCP, `/ws`, **`/tls/ws`** if AutoTLS has run, or `/webrtc-direct/.../certhash/...`).
 
 ## Run the client
 

@@ -1,10 +1,16 @@
+import { join } from 'node:path'
 import { createLibp2p } from 'libp2p'
 import type { Libp2p } from 'libp2p'
 import type { PrivateKey } from '@libp2p/interface'
 import { MemoryBlockstore } from 'blockstore-core'
 import { MemoryDatastore } from 'datastore-core'
+import { LevelDatastore } from 'datastore-level'
 import { createHelia, type HeliaLibp2p } from 'helia'
-import { createServerLibp2pOptions, type RelayListenOverrides } from './libp2p-server-config.js'
+import {
+  createServerLibp2pOptions,
+  readRelayAutoTlsEnabled,
+  type RelayListenOverrides,
+} from './libp2p-server-config.js'
 import { attachLibp2pConnectionLogging, libp2pConnLogEnabledForRelay } from './libp2p-connection-log.js'
 import { BULK_MAX_CHUNK_BYTES } from './bulk-constants.js'
 import { CONNECTIVITY_BULK_PROTOCOL, CONNECTIVITY_ECHO_PROTOCOL } from './protocol.js'
@@ -71,8 +77,17 @@ function attachEchoHandler(libp2p: Libp2p): void {
 }
 
 export async function startRelayRuntime(privateKey: PrivateKey, overrides?: RelayListenOverrides): Promise<RelayRuntime> {
+  let levelDatastore: LevelDatastore | null = null
+  if (readRelayAutoTlsEnabled()) {
+    const raw = process.env.RELAY_AUTO_TLS_DATASTORE_PATH?.trim()
+    const dsPath = raw || join(process.cwd(), 'libp2p-autotls-data')
+    levelDatastore = new LevelDatastore(dsPath)
+    await levelDatastore.open()
+    console.log(`[relay] RELAY_AUTO_TLS: Level datastore at ${dsPath}`)
+  }
+
   const libp2pOptions = {
-    ...(createServerLibp2pOptions(privateKey, overrides) as Record<string, unknown>),
+    ...(createServerLibp2pOptions(privateKey, overrides, levelDatastore ?? undefined) as Record<string, unknown>),
     start: false,
   } as Parameters<typeof createLibp2p>[0]
 
@@ -102,6 +117,13 @@ export async function startRelayRuntime(privateKey: PrivateKey, overrides?: Rela
       } catch {
         // ignore
       }
+      if (levelDatastore) {
+        try {
+          await levelDatastore.close()
+        } catch {
+          // ignore
+        }
+      }
     },
   }
 }
@@ -109,12 +131,19 @@ export async function startRelayRuntime(privateKey: PrivateKey, overrides?: Rela
 export function logRelayBanner(libp2p: Libp2p): void {
   console.log('Relay + echo server peerId:', libp2p.peerId.toString())
   console.log('Listen addresses:')
-  for (const ma of libp2p.getMultiaddrs()) {
-    console.log(' ', ma.toString())
+  const addrs = libp2p.getMultiaddrs().map((ma) => ma.toString())
+  for (const s of addrs) {
+    console.log(' ', s)
   }
   console.log('')
+  const hasTlsWs = addrs.some((s) => s.includes('/tls/ws') || s.includes('/tls/wss'))
+  const autoTlsOn = readRelayAutoTlsEnabled()
   console.log(
-    'Dial one of the above from the client (include /p2p/<peerId> for remote hosts). Transports: TCP, WebSocket (cleartext WS + Noise; not WSS/AutoTLS), QUIC (/quic-v1 UDP), WebRTC-Direct (/webrtc-direct + certhash).'
+    hasTlsWs
+      ? 'Dial one of the above from the client (include /p2p/<peerId> for remote hosts). Transports: TCP, cleartext WS + Noise, **TLS WebSocket (AutoTLS / WSS)** where listed, QUIC (/quic-v1 UDP), WebRTC-Direct (/webrtc-direct + certhash).'
+      : autoTlsOn
+        ? 'RELAY_AUTO_TLS is on — if the node is publicly reachable, watch for /tls/ws addresses (Let’s Encrypt via libp2p.direct); they can appear shortly after start.'
+        : 'Dial one of the above from the client (include /p2p/<peerId> for remote hosts). Transports: TCP, WebSocket (cleartext WS + Noise), QUIC (/quic-v1 UDP), WebRTC-Direct (/webrtc-direct + certhash). Enable RELAY_AUTO_TLS=1 for WSS via @ipshipyard/libp2p-auto-tls.'
   )
   console.log('Protocols:', CONNECTIVITY_ECHO_PROTOCOL, CONNECTIVITY_BULK_PROTOCOL)
   console.log(
