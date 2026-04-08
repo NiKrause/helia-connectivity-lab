@@ -10,7 +10,7 @@ The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in
 - **Optional AutoTLS:** set **`RELAY_AUTO_TLS=1`** and a writable **`RELAY_AUTO_TLS_DATASTORE_PATH`** (LevelDB dir for certs/keys, e.g. under `/var/lib/...`). The relay loads [**`@ipshipyard/libp2p-auto-tls`**](https://www.npmjs.com/package/@ipshipyard/libp2p-auto-tls) plus **`@libp2p/keychain`**, same idea as [orbitdb-relay-pinner](https://github.com/NiKrause/orbitdb-relay-pinner). After the node is **publicly reachable** on the WS port, announced multiaddrs can include **`/tls/ws`** (Let’s Encrypt via **libp2p.direct**). **`autoConfirmAddress: true`** is set so a VPS with a stable public IP does not wait indefinitely for peer confirmation.
 - **`RELAY_AUTO_TLS_STAGING=1`** uses Let’s Encrypt **staging** (avoid rate limits while testing).
 - If **`Listen addresses`** only show **`127.0.0.1`** (relay behind port forwarding), set **`RELAY_APPEND_ANNOUNCE`** to your **public** TCP and cleartext WS multiaddrs (comma-separated, no spaces) so AutoTLS and **`GET /status`** expose routable addresses.
-- **Clients** that want TLS must dial the **`/tls/ws`** multiaddr from **`GET /status`**, not only the cleartext `/ws` line.
+- **Clients** that want TLS must dial the **`/tls/ws`** multiaddr from **`GET /status`**, not only the cleartext `/ws` line. Rebuild this repo after **`npm install`** so the client uses **`@multiformats/multiaddr@12.5.1`** (see version table); otherwise long **`/tls/sni/...`** addresses can fail at dial with **`Incorrect length`**.
 - **Debug AutoTLS:** the service uses the logger component **`libp2p:auto-tls`** (hyphen). Enable with either:
   - **`DEBUG=libp2p:auto-tls npm run server`** (or **`npm run server:debug-autotls`** after `npm run build`), or
   - **`RELAY_DEBUG=libp2p:auto-tls`** in the environment (merged into **`DEBUG`** on startup; handy in systemd).  
@@ -357,9 +357,10 @@ A reference unit file lives at [deploy/helia-connectivity-lab.service](deploy/he
 | `@helia/unixfs` | **5.1.0** | UnixFS add / cat |
 | `blockstore-core` / `datastore-core` | **5.x / 10.x** | In-memory stores in tests |
 | `multiformats` | **13.4.x** | CID parsing |
+| `@multiformats/multiaddr` | **12.5.1** (via **`overrides`**) | **Required** for AutoTLS dial strings with **`/tls/sni/.../libp2p.direct/ws/p2p/...`**. Older **12.4.x** can mis-parse **`/p2p/`** and throw **`Incorrect length`** in **`peerIdFromString`**. Same pin as **pnpm `overrides`** in **bolt-orbitdb-blog** / **`@multiformats/multiaddr@12.5.1`**. |
 | `libp2p` | **^2.10.0** | Unchanged |
 
-**`overrides.it-length-prefixed`** matches the relay-pinner repo to avoid duplicate incompatible copies.
+**`overrides`:** **`it-length-prefixed`** (relay-pinner alignment) and **`@multiformats/multiaddr@12.5.1`** so every dependency resolves one multiaddr implementation.
 
 ### Phase 2A — local two-node round-trip
 
