@@ -16,7 +16,7 @@ Later phases (not implemented here yet): Helia + UnixFS CID fetch, HTTP `GET /ip
 | **TCP**         | `/ip4/<host>/tcp/<port>/p2p/<peerId>` | Simplest for VPS + firewall. |
 | **WebSocket**   | `/ip4/<host>/tcp/<port>/ws/p2p/<peerId>` | Cleartext **WS** + Noise (see above). |
 | **WebRTC-Direct** | `/ip4/<host>/udp/<port>/webrtc-direct/certhash/.../p2p/<peerId>` | Copy **full** addr from server output (includes `certhash`). UDP port must be open. |
-| **QUIC**        | *Not enabled in this repo on libp2p 2.x* | `@chainsafe/libp2p-quic` targets **libp2p interface v3** / **multiaddr v13**; combined with **libp2p 2.x** it broke `getMultiaddrs()` in testing. To test QUIC, plan a **libp2p v3** dependency pass, then add `quic()` and `/udp/.../quic-v1` listeners. |
+| **QUIC**        | *Not wired in this repo yet* | **QUIC on libp2p 2.x is supported** via **`@chainsafe/libp2p-quic@1.1.x`** (declares `@libp2p/interface` ^2.10 and `multiaddr` ^12, same generation as `libp2p` 2.x). **`@chainsafe/libp2p-quic@2.x`** targets **interface v3** / **multiaddr v13** (libp2p **3.x**); installing 2.x on a libp2p **2.x** app caused duplicate types and a **`stringTuples` / `getMultiaddrs` runtime error** in our earlier attempt. There is no separate **`@libp2p/quic`** package on npm; ChainSafe is the practical JS implementation. **Phase 1b:** pin **`@chainsafe/libp2p-quic@1.1.8`** (or latest **1.1.x**) with **`libp2p` ^2.10**—a full jump to libp2p v3 is optional, not required for QUIC. |
 
 **WebTransport** is intentionally out of scope for now.
 
@@ -142,7 +142,7 @@ A reference unit file lives at [deploy/helia-connectivity-lab.service](deploy/he
 ## Roadmap
 
 1. **Phase 1 (this repo):** libp2p dial + stream echo; relay server enabled; TCP, WS, WebRTC-Direct.
-2. **Phase 1b:** QUIC once on **libp2p v3** + aligned `@chainsafe/libp2p-quic` / multiaddr major versions.
+2. **Phase 1b:** Add **`@chainsafe/libp2p-quic@1.1.x`** + `/udp/.../quic-v1` listeners (stays on **libp2p 2.x**). Use **`@chainsafe/libp2p-quic@2.x`** only if you migrate the whole stack to **libp2p 3.x**.
 3. **Phase 2:** Add `helia` + `@helia/unixfs`; publish a small text blob from the client; fetch on the server via the network (bitswap/DHT), still without HTTP.
 4. **Phase 3:** Optional HTTP server on the server: `GET /ipfs/<cid>` backed by Helia `unixfs.cat` over the network.
 5. **Phase 4:** Browser bundle (e.g. Vite) with WebSockets/WebRTC; same echo or `/ipfs` flow with CORS on the HTTP API.
