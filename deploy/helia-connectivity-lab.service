@@ -1,0 +1,22 @@
+[Unit]
+Description=helia-connectivity-lab libp2p echo + circuit relay
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/helia-connectivity-lab
+Environment=NODE_ENV=production
+Environment=RELAY_LISTEN_IPV4=0.0.0.0
+Environment=RELAY_DISABLE_IPV6=true
+Environment=RELAY_TCP_PORT=9091
+Environment=RELAY_WS_PORT=9092
+Environment=RELAY_WEBRTC_PORT=9093
+# Nym-friendly: control on allowed port; use EnvironmentFile for RELAY_CONTROL_TOKEN
+Environment=RELAY_CONTROL_HTTP_PORT=8008
+EnvironmentFile=-/etc/default/helia-connectivity-lab
+ExecStart=/usr/bin/node dist/server.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

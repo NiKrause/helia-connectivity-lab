@@ -1,0 +1,37 @@
+{
+  "name": "helia-connectivity-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase 1: libp2p + circuit relay v2 echo connectivity test (Helia phases later).",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "server": "node dist/server.js",
+    "client": "node dist/client.js",
+    "start:server": "npm run build && npm run server",
+    "start:client": "npm run build && npm run client"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-noise": "^16.1.4",
+    "@chainsafe/libp2p-yamux": "^7.0.4",
+    "@libp2p/circuit-relay-v2": "^3.2.24",
+    "@libp2p/crypto": "^5.1.1",
+    "@libp2p/identify": "^3.0.39",
+    "@libp2p/tcp": "^10.1.10",
+    "@libp2p/webrtc": "^5.2.23",
+    "@libp2p/websockets": "^9.2.19",
+    "@multiformats/multiaddr": "12.4.4",
+    "libp2p": "^2.10.0",
+    "uint8arrays": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "@multiformats/multiaddr": "12.4.4"
+  }
+}
