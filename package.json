@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "server": "node dist/server.js",
     "client": "node dist/client.js",
+    "client:transfer": "node dist/transfer-client.js",
     "start:server": "npm run build && npm run server",
     "start:client": "npm run build && npm run client",
     "test:transports": "npm run build && node dist/transport-matrix.js"
