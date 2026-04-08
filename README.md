@@ -11,6 +11,10 @@ The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in
 - **`RELAY_AUTO_TLS_STAGING=1`** uses Let’s Encrypt **staging** (avoid rate limits while testing).
 - If **`Listen addresses`** only show **`127.0.0.1`** (relay behind port forwarding), set **`RELAY_APPEND_ANNOUNCE`** to your **public** TCP and cleartext WS multiaddrs (comma-separated, no spaces) so AutoTLS and **`GET /status`** expose routable addresses.
 - **Clients** that want TLS must dial the **`/tls/ws`** multiaddr from **`GET /status`**, not only the cleartext `/ws` line.
+- **Debug AutoTLS:** the service uses the logger component **`libp2p:auto-tls`** (hyphen). Enable with either:
+  - **`DEBUG=libp2p:auto-tls npm run server`** (or **`npm run server:debug-autotls`** after `npm run build`), or
+  - **`RELAY_DEBUG=libp2p:auto-tls`** in the environment (merged into **`DEBUG`** on startup; handy in systemd).  
+  **`DEBUG=libp2p:autotls`** (no hyphen) does **not** match and will stay silent.
 
 ## Transports you can test (no WebTransport)
 
@@ -221,6 +225,7 @@ RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_QUIC_PORT=5000 RELAY_WEBRTC_PORT=90
 | `RELAY_AUTO_TLS_DATASTORE_PATH` | `./libp2p-autotls-data` | Writable directory for LevelDB (certs). Use e.g. **`/var/lib/helia-connectivity-lab/libp2p-datastore`** on a VPS. |
 | `RELAY_AUTO_TLS_STAGING` | unset | Set to **`1`** for Let’s Encrypt **staging** ACME. |
 | `RELAY_APPEND_ANNOUNCE` | unset | Comma-separated multiaddrs **without spaces** to **append** as announced addresses (e.g. public **`/ip4/x/tcp/81`** and **`/ip4/x/tcp/8443/ws`** when the process listens on loopback behind port forwarding). Helps **`GET /status`** and **AutoTLS** see a publicly dialable WS address. |
+| `RELAY_DEBUG` | unset | Appended to **`DEBUG`** before startup (e.g. **`libp2p:auto-tls`** for AutoTLS trace logs). Same as setting **`DEBUG`** yourself; see TLS section above. |
 
 On start, the server prints **PeerId** and **dialable multiaddrs**. Pick the line that matches the transport you want to test (TCP, `/ws`, **`/tls/ws`** if AutoTLS has run, or `/webrtc-direct/.../certhash/...`).
 

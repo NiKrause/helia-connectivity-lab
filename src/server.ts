@@ -1,3 +1,4 @@
+import './bootstrap-debug.js'
 import type { RelayRuntime } from './relay-runtime.js'
 import { logRelayBanner, startRelayRuntime } from './relay-runtime.js'
 import { loadOrGenerateRelayPrivateKey } from './relay-key.js'
