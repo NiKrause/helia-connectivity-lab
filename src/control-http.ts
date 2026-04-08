@@ -50,12 +50,12 @@ function authorize(req: http.IncomingMessage, token: string): boolean {
   return false
 }
 
-function parseRunPath(pathname: string): { kind: 'tcp' | 'ws'; port: number } | null {
-  const m = pathname.match(/^\/run\/(tcp|ws)\/(\d{1,5})\/?$/)
+function parseRunPath(pathname: string): { kind: 'tcp' | 'ws' | 'quic'; port: number } | null {
+  const m = pathname.match(/^\/run\/(tcp|ws|quic)\/(\d{1,5})\/?$/)
   if (!m) return null
   const port = Number(m[2])
   if (!Number.isFinite(port) || port < 1 || port > 65535) return null
-  return { kind: m[1] as 'tcp' | 'ws', port }
+  return { kind: m[1] as 'tcp' | 'ws' | 'quic', port }
 }
 
 export type ControlHttpServer = {
@@ -65,7 +65,8 @@ export type ControlHttpServer = {
 /**
  * HTTP control plane (e.g. Nym-friendly port like 8008) to restart libp2p listeners without changing PeerId.
  * POST /run/tcp/81 — rebind TCP (requires root or CAP_NET_BIND_SERVICE for ports &lt; 1024).
- * POST /run/ws/8008 — rebind WebSocket listener port.
+ * POST /run/ws/8080 — rebind WebSocket listener port.
+ * POST /run/quic/5000 — rebind QUIC (UDP) listener port.
  */
 export function startControlHttpServer(opts: {
   privateKey: PrivateKey
@@ -139,7 +140,10 @@ export function startControlHttpServer(opts: {
       const run = parseRunPath(pathname)
       if (run) {
         const prev = opts.getOverrides()
-        const next: RelayListenOverrides = { ...prev, ...(run.kind === 'tcp' ? { tcpPort: run.port } : { wsPort: run.port }) }
+        const next: RelayListenOverrides = {
+          ...prev,
+          ...(run.kind === 'tcp' ? { tcpPort: run.port } : run.kind === 'ws' ? { wsPort: run.port } : { quicPort: run.port }),
+        }
 
         try {
           await runSerial(async () => {
@@ -170,7 +174,9 @@ export function startControlHttpServer(opts: {
 
   server.listen(cfg.port, cfg.host, () => {
     console.log(`Control HTTP listening on http://${cfg.host}:${cfg.port}`)
-    console.log('  POST /run/tcp/<port>  POST /run/ws/<port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)')
+    console.log(
+      '  POST /run/tcp/<port>  POST /run/ws/<port>  POST /run/quic/<udp-port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)'
+    )
     console.log('  GET /health  GET /status (auth)')
   })
 

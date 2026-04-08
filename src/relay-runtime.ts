@@ -57,7 +57,7 @@ export function logRelayBanner(libp2p: Libp2p): void {
   }
   console.log('')
   console.log(
-    'Dial one of the above from the client (include /p2p/<peerId> for remote hosts). Transports: TCP, WebSocket (cleartext WS + Noise; not WSS/AutoTLS), WebRTC-Direct (/webrtc-direct + certhash). QUIC: optional via @chainsafe/libp2p-quic 1.1.x (see README).'
+    'Dial one of the above from the client (include /p2p/<peerId> for remote hosts). Transports: TCP, WebSocket (cleartext WS + Noise; not WSS/AutoTLS), QUIC (/quic-v1 UDP), WebRTC-Direct (/webrtc-direct + certhash).'
   )
   console.log('Protocol:', CONNECTIVITY_ECHO_PROTOCOL)
 }

@@ -1,5 +1,6 @@
 import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
+import { quic } from '@chainsafe/libp2p-quic'
 import { circuitRelayTransport, circuitRelayServer } from '@libp2p/circuit-relay-v2'
 import { identify, identifyPush } from '@libp2p/identify'
 import { webRTCDirect } from '@libp2p/webrtc'
@@ -10,10 +11,12 @@ import type { PrivateKey } from '@libp2p/interface'
 export type RelayListenEnv = {
   tcpPort: number
   wsPort: number
+  quicPort: number
   webrtcPort: number
   listenIpv4: string
   disableIpv6: boolean
   disableWebRtc: boolean
+  disableQuic: boolean
 }
 
 export type RelayListenOverrides = Partial<RelayListenEnv>
@@ -21,6 +24,7 @@ export type RelayListenOverrides = Partial<RelayListenEnv>
 export function readListenEnv(): RelayListenEnv {
   const tcpPort = Number(process.env.RELAY_TCP_PORT || 9091)
   const wsPort = Number(process.env.RELAY_WS_PORT || 9092)
+  const quicPort = Number(process.env.RELAY_QUIC_PORT || 5000)
   const webrtcPort = Number(process.env.RELAY_WEBRTC_PORT || 9093)
   const listenIpv4 = process.env.RELAY_LISTEN_IPV4 || '0.0.0.0'
   const disableIpv6 = process.env.RELAY_DISABLE_IPV6 === 'true' || process.env.RELAY_DISABLE_IPV6 === '1'
@@ -28,7 +32,8 @@ export function readListenEnv(): RelayListenEnv {
     process.env.RELAY_DISABLE_WEBRTC === 'true' ||
     process.env.RELAY_DISABLE_WEBRTC === '1' ||
     process.env.RELAY_DISABLE_WEBRTC_DIRECT === 'true'
-  return { tcpPort, wsPort, webrtcPort, listenIpv4, disableIpv6, disableWebRtc }
+  const disableQuic = process.env.RELAY_DISABLE_QUIC === 'true' || process.env.RELAY_DISABLE_QUIC === '1'
+  return { tcpPort, wsPort, quicPort, webrtcPort, listenIpv4, disableIpv6, disableWebRtc, disableQuic }
 }
 
 export function createServerLibp2pOptions(privateKey: PrivateKey, overrides?: RelayListenOverrides): Record<string, unknown> {
@@ -38,11 +43,17 @@ export function createServerLibp2pOptions(privateKey: PrivateKey, overrides?: Re
     `/ip4/${e.listenIpv4}/tcp/${e.tcpPort}`,
     `/ip4/${e.listenIpv4}/tcp/${e.wsPort}/ws`,
   ]
+  if (!e.disableQuic) {
+    listen.push(`/ip4/${e.listenIpv4}/udp/${e.quicPort}/quic-v1`)
+  }
   if (!e.disableWebRtc) {
     listen.push(`/ip4/${e.listenIpv4}/udp/${e.webrtcPort}/webrtc-direct`)
   }
   if (!e.disableIpv6) {
     listen.push(`/ip6/::/tcp/${e.tcpPort}`, `/ip6/::/tcp/${e.wsPort}/ws`)
+    if (!e.disableQuic) {
+      listen.push(`/ip6/::/udp/${e.quicPort}/quic-v1`)
+    }
     if (!e.disableWebRtc) {
       listen.push(`/ip6/::/udp/${e.webrtcPort}/webrtc-direct`)
     }
@@ -52,6 +63,7 @@ export function createServerLibp2pOptions(privateKey: PrivateKey, overrides?: Re
     circuitRelayTransport(),
     tcp(),
     webSockets(),
+    ...(!e.disableQuic ? [quic()] : []),
     ...(!e.disableWebRtc ? [webRTCDirect()] : []),
   ]
 
