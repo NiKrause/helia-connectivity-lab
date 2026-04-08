@@ -146,6 +146,17 @@ npm run test:transports -- "run-with-nym-vpn" --out ./transport-runs.txt
 
 Requires server ports matching your deployment (e.g. Nym-friendly **81 / 8080 / 5000 / 3478** from [deploy/helia-connectivity-lab.service](deploy/helia-connectivity-lab.service)).
 
+### VPN on vs off (run on your laptop)
+
+Public **:8008** may be blocked by your cloud firewall; the matrix can still load **`GET /status`** via **SSH** and dial the public IP. Use:
+
+```bash
+chmod +x scripts/run-vpn-compare-matrix.sh
+./scripts/run-vpn-compare-matrix.sh
+```
+
+The script prints when to turn **Nym ON** (wait 50s, then first run **`with-nym-vpn`**) and when to turn it **OFF** (wait 35s, then **`without-vpn`**). Override **`RELAY_SSH`**, **`RELAY_DIAL_HOST`**, **`TRANSPORT_RUNS`** if needed.
+
 ## Deploying to a VPS (e.g. `libp2p.le-space.de`)
 
 From your laptop (with SSH access), sync sources and install on the server:
