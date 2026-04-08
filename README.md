@@ -54,6 +54,8 @@ curl -sS -X POST "http://YOUR_HOST:8008/run/tcp/81" \
 
 **Security:** anyone who can reach the control port and guess the token can rebind listeners. Prefer binding control to **localhost** and using SSH port-forwarding, or firewall the control port to your IP only, and use a long random token.
 
+**401 Unauthorized with a “correct” token:** systemd applies **`EnvironmentFile=` after `Environment=`** and **overrides the same variable name**. If both the unit file and **`/etc/default/helia-connectivity-lab`** set `RELAY_CONTROL_TOKEN`, the **file wins**—the process will not use the token in the unit. Put the token in **one place only** (recommended: `/etc/default/helia-connectivity-lab`). Also use **`GET /status`** (not `POST`); `POST` is only for `/run/...`.
+
 ## Stable PeerId (recommended with control API)
 
 | Variable | Meaning |
