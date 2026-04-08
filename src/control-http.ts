@@ -50,12 +50,15 @@ function authorize(req: http.IncomingMessage, token: string): boolean {
   return false
 }
 
-function parseRunPath(pathname: string): { kind: 'tcp' | 'ws' | 'quic'; port: number } | null {
-  const m = pathname.match(/^\/run\/(tcp|ws|quic)\/(\d{1,5})\/?$/)
+function parseRunPath(pathname: string): { kind: 'tcp' | 'ws' | 'quic' | 'webrtc'; port: number } | null {
+  const m = pathname.match(/^\/run\/(tcp|ws|quic|webrtc|webrtc-direct)\/(\d{1,5})\/?$/)
   if (!m) return null
   const port = Number(m[2])
   if (!Number.isFinite(port) || port < 1 || port > 65535) return null
-  return { kind: m[1] as 'tcp' | 'ws' | 'quic', port }
+  const seg = m[1]
+  const kind: 'tcp' | 'ws' | 'quic' | 'webrtc' =
+    seg === 'webrtc' || seg === 'webrtc-direct' ? 'webrtc' : (seg as 'tcp' | 'ws' | 'quic')
+  return { kind, port }
 }
 
 export type ControlHttpServer = {
@@ -67,6 +70,12 @@ export type ControlHttpServer = {
  * POST /run/tcp/81 — rebind TCP (requires root or CAP_NET_BIND_SERVICE for ports &lt; 1024).
  * POST /run/ws/8080 — rebind WebSocket listener port.
  * POST /run/quic/5000 — rebind QUIC (UDP) listener port.
+ * POST /run/webrtc/3478 — rebind WebRTC-Direct (UDP) listener port (alias: POST /run/webrtc-direct/&lt;port&gt;).
+ *
+ * Returns HTTP 202 with JSON, then restarts libp2p on the next event-loop turn (setImmediate).
+ * We do not wait for res "finish" before scheduling: in some clients or proxies, finish never
+ * fired and the restart never ran. Connection: close on this response avoids sticky keep-alive edge cases.
+ * Poll GET /status for new multiaddrs.
  */
 export function startControlHttpServer(opts: {
   privateKey: PrivateKey
@@ -139,32 +148,52 @@ export function startControlHttpServer(opts: {
     if (req.method === 'POST') {
       const run = parseRunPath(pathname)
       if (run) {
+        req.resume()
         const prev = opts.getOverrides()
         const next: RelayListenOverrides = {
           ...prev,
-          ...(run.kind === 'tcp' ? { tcpPort: run.port } : run.kind === 'ws' ? { wsPort: run.port } : { quicPort: run.port }),
+          ...(run.kind === 'tcp'
+            ? { tcpPort: run.port }
+            : run.kind === 'ws'
+              ? { wsPort: run.port }
+              : run.kind === 'quic'
+                ? { quicPort: run.port }
+                : { webrtcPort: run.port }),
         }
 
-        try {
-          await runSerial(async () => {
-            const old = opts.getRuntime()
-            await old.stop()
-            opts.setOverrides(next)
-            const created = await startRelayRuntime(opts.privateKey, next)
-            opts.setRuntime(created)
-            console.log(`[control] restarted libp2p ${run.kind} listener on port ${run.port}`)
-            logRelayBanner(created.libp2p)
-          })
-          const rt = opts.getRuntime()
-          sendJson(res, 200, {
-            ok: true,
-            peerId: rt.libp2p.peerId.toString(),
-            listenOverrides: opts.getOverrides(),
-            multiaddrs: rt.libp2p.getMultiaddrs().map((ma) => ma.toString()),
-          })
-        } catch (e: any) {
-          sendJson(res, 500, { ok: false, error: e?.message || String(e) })
+        const rtBefore = opts.getRuntime()
+        const body: Record<string, unknown> = {
+          ok: true,
+          accepted: true,
+          restart: 'pending',
+          peerId: rtBefore.libp2p.peerId.toString(),
+          listenOverrides: next,
+          multiaddrsBeforeRestart: rtBefore.libp2p.getMultiaddrs().map((ma) => ma.toString()),
+          hint: 'Libp2p restart is scheduled right after this response. Poll GET /status in ~1s.',
         }
+        res.setHeader('Connection', 'close')
+        sendJson(res, 202, body)
+
+        setImmediate(() => {
+          void runSerial(async () => {
+            try {
+              console.log(
+                `[control] restart starting: ${run.kind === 'webrtc' ? 'webrtc-direct' : run.kind} -> port ${run.port}`
+              )
+              const old = opts.getRuntime()
+              await old.stop()
+              opts.setOverrides(next)
+              const created = await startRelayRuntime(opts.privateKey, next)
+              opts.setRuntime(created)
+              console.log(
+                `[control] restarted libp2p ${run.kind === 'webrtc' ? 'webrtc-direct' : run.kind} listener on port ${run.port}`
+              )
+              logRelayBanner(created.libp2p)
+            } catch (e) {
+              console.error('[control] libp2p restart failed:', e)
+            }
+          }).catch(() => {})
+        })
         return
       }
     }
@@ -175,7 +204,7 @@ export function startControlHttpServer(opts: {
   server.listen(cfg.port, cfg.host, () => {
     console.log(`Control HTTP listening on http://${cfg.host}:${cfg.port}`)
     console.log(
-      '  POST /run/tcp/<port>  POST /run/ws/<port>  POST /run/quic/<udp-port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)'
+      '  POST /run/tcp|ws|quic|webrtc|webrtc-direct/<port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)'
     )
     console.log('  GET /health  GET /status (auth)')
   })

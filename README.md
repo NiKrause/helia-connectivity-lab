@@ -6,17 +6,19 @@ Later phases (not implemented here yet): Helia + UnixFS CID fetch, HTTP `GET /ip
 
 ## TLS / AutoTLS vs what this lab uses
 
-- **This project does not use AutoTLS or WSS.** The WebSocket transport listens on **`ws://` (cleartext)**. The libp2p stack still negotiates **Noise** on top of the socket, so the libp2p session is encrypted and authenticated—this is **not** the same as browser-grade `wss://` + public PKI.
-- **AutoTLS** (as in [orbitdb-relay-pinner](https://github.com/NiKrause/orbitdb-relay-pinner) with `@ipshipyard/libp2p-auto-tls`) provisions TLS certs so **`wss://`** and HTTPS endpoints can use normal TLS hostnames. That is **not** wired here; add it only if you need WSS/HTTPS interop.
+- **This project does not use AutoTLS or WSS.** The WebSocket transport listens on `**ws://` (cleartext)**. The libp2p stack still negotiates **Noise** on top of the socket, so the libp2p session is encrypted and authenticated—this is **not** the same as browser-grade `wss://` + public PKI.
+- **AutoTLS** (as in [orbitdb-relay-pinner](https://github.com/NiKrause/orbitdb-relay-pinner) with `@ipshipyard/libp2p-auto-tls`) provisions TLS certs so `**wss://`** and HTTPS endpoints can use normal TLS hostnames. That is **not** wired here; add it only if you need WSS/HTTPS interop.
 
 ## Transports you can test (no WebTransport)
 
-| Transport        | Multiaddr shape (after `/p2p/<peerId>`) | Notes |
-|-----------------|----------------------------------------|--------|
-| **TCP**         | `/ip4/<host>/tcp/<port>/p2p/<peerId>` | Simplest for VPS + firewall. |
-| **WebSocket**   | `/ip4/<host>/tcp/<port>/ws/p2p/<peerId>` | Cleartext **WS** + Noise (see above). |
-| **WebRTC-Direct** | `/ip4/<host>/udp/<port>/webrtc-direct/certhash/.../p2p/<peerId>` | Copy **full** addr from server output (includes `certhash`). UDP port must be open. |
-| **QUIC**        | `/ip4/<host>/udp/<port>/quic-v1/p2p/<peerId>` | **`@chainsafe/libp2p-quic@1.1.8`** with **libp2p 2.x**. Default **`RELAY_QUIC_PORT=5000`** matches Nym **`ExitPolicy accept *:5000-5005`**. Nym’s published policy is **TCP-oriented**; **UDP** to your server may still depend on the VPN path—test from your client. |
+
+| Transport         | Multiaddr shape (after `/p2p/<peerId>`)                          | Notes                                                                                                                                                                                                                                                     |
+| ----------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **TCP**           | `/ip4/<host>/tcp/<port>/p2p/<peerId>`                            | Simplest for VPS + firewall.                                                                                                                                                                                                                              |
+| **WebSocket**     | `/ip4/<host>/tcp/<port>/ws/p2p/<peerId>`                         | Cleartext **WS** + Noise (see above).                                                                                                                                                                                                                     |
+| **WebRTC-Direct** | `/ip4/<host>/udp/<port>/webrtc-direct/certhash/.../p2p/<peerId>` | Copy **full** addr from server output (includes `certhash`). UDP port must be open.                                                                                                                                                                       |
+| **QUIC**          | *Not enabled in this repo on libp2p 2.x*                         | `@chainsafe/libp2p-quic` targets **libp2p interface v3** / **multiaddr v13**; combined with **libp2p 2.x** it broke `getMultiaddrs()` in testing. To test QUIC, plan a **libp2p v3** dependency pass, then add `quic()` and `/udp/.../quic-v1` listeners. |
+
 
 **WebTransport** is intentionally out of scope for now.
 
@@ -28,24 +30,25 @@ Disable WebRTC-Direct on the server if you only want TCP/WS: `RELAY_DISABLE_WEBR
 
 Enable a small **Node HTTP** control server (plain HTTP, separate from libp2p):
 
-| Variable | Meaning |
-|----------|---------|
-| `RELAY_CONTROL_HTTP_PORT` | If set (e.g. `8008`), the control API listens on this port. **Unset = disabled.** Alias: `CONTROL_HTTP_PORT`. |
-| `RELAY_CONTROL_HTTP_HOST` | Bind address (default `0.0.0.0`). Alias: `CONTROL_HTTP_HOST`. |
-| `RELAY_CONTROL_TOKEN` | **Required** when the control port is set. Use `Authorization: Bearer <token>` or header `X-Control-Token: <token>`. Alias: `CONTROL_TOKEN`. |
-| `RELAY_CONTROL_CORS_ORIGIN` | Optional CORS allowlist for browser tools (default `*`). |
+
+| Variable                    | Meaning                                                                                                                                      |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RELAY_CONTROL_HTTP_PORT`   | If set (e.g. `8008`), the control API listens on this port. **Unset = disabled.** Alias: `CONTROL_HTTP_PORT`.                                |
+| `RELAY_CONTROL_HTTP_HOST`   | Bind address (default `0.0.0.0`). Alias: `CONTROL_HTTP_HOST`.                                                                                |
+| `RELAY_CONTROL_TOKEN`       | **Required** when the control port is set. Use `Authorization: Bearer <token>` or header `X-Control-Token: <token>`. Alias: `CONTROL_TOKEN`. |
+| `RELAY_CONTROL_CORS_ORIGIN` | Optional CORS allowlist for browser tools (default `*`).                                                                                     |
+
 
 Endpoints:
 
-- **`GET /health`** — no auth; `{"status":"ok","control":true}`.
-- **`GET /status`** — requires auth; returns `peerId`, active `listenOverrides`, and `multiaddrs`.
-- **`POST /run/tcp/<port>`** — stops libp2p and starts it again with TCP bound to `<port>`. **PeerId stays the same** if you use `RELAY_PRIVATE_KEY_HEX` or `RELAY_KEY_FILE` (recommended on a VPS).
-- **`POST /run/ws/<port>`** — same for the **WebSocket** listener port.
-- **`POST /run/quic/<udp-port>`** — same for the **QUIC** (UDP) listener port.
+- `**GET /health`** — no auth; `{"status":"ok","control":true}`.
+- `**GET /status`** — requires auth; returns `peerId`, active `listenOverrides`, and `multiaddrs`.
+- `**POST /run/tcp/<port>`** — stops libp2p and starts it again with TCP bound to `<port>`. **PeerId stays the same** if you use `RELAY_PRIVATE_KEY_HEX` or `RELAY_KEY_FILE` (recommended on a VPS).
+- `**POST /run/ws/<port>`** — same for the **WebSocket** listener port.
 
 Each restart recreates the libp2p node; **WebRTC-Direct** listening addresses (including `certhash`) change even when **PeerId** is stable—re-copy those multiaddrs after a restart if you use WebRTC.
 
-Example (control on 8008, then move libp2p TCP to 81 — **run Node as root** for ports &lt; 1024, or use `setcap cap_net_bind_service=+ep $(which node)`):
+Example (control on 8008, then move libp2p TCP to 81 — **run Node as root** for ports < 1024, or use `setcap cap_net_bind_service=+ep $(which node)`):
 
 ```bash
 curl -sS -X POST "http://YOUR_HOST:8008/run/tcp/81" \
@@ -54,14 +57,14 @@ curl -sS -X POST "http://YOUR_HOST:8008/run/tcp/81" \
 
 **Security:** anyone who can reach the control port and guess the token can rebind listeners. Prefer binding control to **localhost** and using SSH port-forwarding, or firewall the control port to your IP only, and use a long random token.
 
-**401 Unauthorized with a “correct” token:** systemd applies **`EnvironmentFile=` after `Environment=`** and **overrides the same variable name**. If both the unit file and **`/etc/default/helia-connectivity-lab`** set `RELAY_CONTROL_TOKEN`, the **file wins**—the process will not use the token in the unit. Put the token in **one place only** (recommended: `/etc/default/helia-connectivity-lab`). Also use **`GET /status`** (not `POST`); `POST` is only for `/run/...`.
-
 ## Stable PeerId (recommended with control API)
 
-| Variable | Meaning |
-|----------|---------|
-| `RELAY_PRIVATE_KEY_HEX` | Hex-encoded libp2p **private key protobuf** (persistent identity). |
-| `RELAY_KEY_FILE` | Path to a hex key file; created on first start if missing (mode `0600`). |
+
+| Variable                | Meaning                                                                  |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `RELAY_PRIVATE_KEY_HEX` | Hex-encoded libp2p **private key protobuf** (persistent identity).       |
+| `RELAY_KEY_FILE`        | Path to a hex key file; created on first start if missing (mode `0600`). |
+
 
 Without these, each process start generates a new key; **TCP port changes via REST keep the same key** only within one process lifetime.
 
@@ -83,19 +86,19 @@ Default listen: TCP **9091**, WebSocket **9092**, WebRTC-Direct UDP **9093** on 
 ```bash
 npm run server
 # or
-RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_QUIC_PORT=5000 RELAY_WEBRTC_PORT=9093 RELAY_LISTEN_IPV4=0.0.0.0 npm run server
+RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_WEBRTC_PORT=9093 RELAY_LISTEN_IPV4=0.0.0.0 npm run server
 ```
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `RELAY_TCP_PORT` | `9091` | TCP listen port (Nym: **81** is in `*:80-81`) |
-| `RELAY_WS_PORT` | `9092` | WebSocket listen port (Nym: **8080** is allowed) |
-| `RELAY_QUIC_PORT` | `5000` | UDP port for **QUIC** `/quic-v1` (Nym: **5000–5005** allowed) |
-| `RELAY_WEBRTC_PORT` | `9093` | UDP for **WebRTC-Direct** (Nym: **3478–3484** allowed) |
-| `RELAY_DISABLE_QUIC` | unset | Set to `true` to disable QUIC |
-| `RELAY_LISTEN_IPV4` | `0.0.0.0` | IPv4 bind address |
-| `RELAY_DISABLE_IPV6` | unset | Set to `true` or `1` to skip IPv6 listeners |
-| `RELAY_DISABLE_WEBRTC` | unset | Set to `true` or `1` to disable WebRTC-Direct |
+
+| Variable               | Default   | Meaning                                       |
+| ---------------------- | --------- | --------------------------------------------- |
+| `RELAY_TCP_PORT`       | `9091`    | TCP listen port                               |
+| `RELAY_WS_PORT`        | `9092`    | WebSocket listen port                         |
+| `RELAY_WEBRTC_PORT`    | `9093`    | UDP port for **WebRTC-Direct**                |
+| `RELAY_LISTEN_IPV4`    | `0.0.0.0` | IPv4 bind address                             |
+| `RELAY_DISABLE_IPV6`   | unset     | Set to `true` or `1` to skip IPv6 listeners   |
+| `RELAY_DISABLE_WEBRTC` | unset     | Set to `true` or `1` to disable WebRTC-Direct |
+
 
 On start, the server prints **PeerId** and **dialable multiaddrs**. Pick the line that matches the transport you want to test (TCP, `/ws`, or `/webrtc-direct/.../certhash/...`).
 
@@ -122,43 +125,6 @@ RELAY_MULTIADDR='/ip4/203.0.113.10/tcp/9092/ws/p2p/12D3KooW...' npm run client -
 
 If the client should not load WebRTC (e.g. TCP/WS-only test): `CLIENT_DISABLE_WEBRTC=true`.
 
-## Repeatable transport matrix (VPN vs non-VPN)
-
-Script: **`npm run test:transports`** — calls control **`GET /status`**, picks one multiaddr per transport (**TCP**, **WebSocket**, **QUIC**, **WebRTC-Direct**) for your **dial host**, runs the echo protocol, and **appends** a block to a text file (default **`transport-test-results.txt`** in the current directory; listed in `.gitignore`).
-
-| Env / flag | Meaning |
-|------------|---------|
-| `RELAY_CONTROL_BASE` or `--base` | e.g. `http://95.217.163.72:8008` |
-| `RELAY_CONTROL_TOKEN` or `--token` | Bearer token for `/status` |
-| `RELAY_DIAL_HOST` or `--dial` | Public **IP or DNS** used to choose which advertised multiaddrs to dial (e.g. `95.217.163.72`). If `--base` uses a numeric IP, this defaults to that IP. |
-| First positional | **Label** for the run (logged in the file; also the default **echo** payload). |
-| `--out FILE` | Append to this file instead (e.g. `--out ~/vpn-comparison.txt`). |
-| `--message TEXT` | Override the echo string (default: same as the label). |
-
-**Examples** (run twice: once with Nym off, once with Nym on, same `--out` to accumulate):
-
-```bash
-export RELAY_CONTROL_BASE=http://95.217.163.72:8008
-export RELAY_CONTROL_TOKEN='your-token'
-export RELAY_DIAL_HOST=95.217.163.72
-
-npm run test:transports -- "run-without-vpn" --out ./transport-runs.txt
-npm run test:transports -- "run-with-nym-vpn" --out ./transport-runs.txt
-```
-
-Requires server ports matching your deployment (e.g. Nym-friendly **81 / 8080 / 5000 / 3478** from [deploy/helia-connectivity-lab.service](deploy/helia-connectivity-lab.service)).
-
-### VPN on vs off (run on your laptop)
-
-Public **:8008** may be blocked by your cloud firewall; the matrix can still load **`GET /status`** via **SSH** and dial the public IP. Use:
-
-```bash
-chmod +x scripts/run-vpn-compare-matrix.sh
-./scripts/run-vpn-compare-matrix.sh
-```
-
-The script prints when to turn **Nym ON** (wait 50s, then first run **`with-nym-vpn`**) and when to turn it **OFF** (wait 35s, then **`without-vpn`**). Override **`RELAY_SSH`**, **`RELAY_DIAL_HOST`**, **`TRANSPORT_RUNS`** if needed.
-
 ## Deploying to a VPS (e.g. `libp2p.le-space.de`)
 
 From your laptop (with SSH access), sync sources and install on the server:
@@ -184,7 +150,7 @@ A reference unit file lives at [deploy/helia-connectivity-lab.service](deploy/he
 ## Roadmap
 
 1. **Phase 1 (this repo):** libp2p dial + stream echo; relay server enabled; TCP, WS, WebRTC-Direct.
-2. **Phase 1b:** **Done in repo** — **`@chainsafe/libp2p-quic@1.1.8`** + `/udp/.../quic-v1`. Optional future: **`@chainsafe/libp2p-quic@2.x`** if you migrate to **libp2p 3.x**.
+2. **Phase 1b:** QUIC once on **libp2p v3** + aligned `@chainsafe/libp2p-quic` / multiaddr major versions.
 3. **Phase 2:** Add `helia` + `@helia/unixfs`; publish a small text blob from the client; fetch on the server via the network (bitswap/DHT), still without HTTP.
 4. **Phase 3:** Optional HTTP server on the server: `GET /ipfs/<cid>` backed by Helia `unixfs.cat` over the network.
 5. **Phase 4:** Browser bundle (e.g. Vite) with WebSockets/WebRTC; same echo or `/ipfs` flow with CORS on the HTTP API.

@@ -3,3 +3,5 @@ dist/
 *.log
 .DS_Store
 transport-test-results.txt
+transport-runs.txt
+.relay-status.json

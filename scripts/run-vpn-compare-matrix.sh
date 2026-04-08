@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run on YOUR machine (where Nym runs). Fetches /status over SSH (avoids public :8008).
+# Run on YOUR machine (where Nym runs). Fetches /status over SSH (avoids public :88).
 set -euo pipefail
 
 RELAY_SSH="${RELAY_SSH:-root@libp2p.le-space.de}"
@@ -11,7 +11,7 @@ trap 'rm -f "$JSON"' EXIT
 
 echo "Fetching GET /status from relay over SSH → $JSON"
 ssh -o BatchMode=yes "$RELAY_SSH" \
-  'set -a; [ -f /etc/default/helia-connectivity-lab ] && . /etc/default/helia-connectivity-lab; set +a; curl -fsS -H "Authorization: Bearer ${RELAY_CONTROL_TOKEN}" http://127.0.0.1:8008/status' \
+  'set -a; [ -f /etc/default/helia-connectivity-lab ] && . /etc/default/helia-connectivity-lab; set +a; curl -fsS -H "Authorization: Bearer ${RELAY_CONTROL_TOKEN}" http://127.0.0.1:88/status' \
   >"$JSON"
 
 cd "$REPO_ROOT"
