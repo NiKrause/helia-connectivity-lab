@@ -2,12 +2,28 @@ import http from 'node:http'
 import type { RelayRuntime } from './relay-runtime.js'
 import { logRelayBanner, startRelayRuntime } from './relay-runtime.js'
 import type { PrivateKey } from '@libp2p/interface'
-import type { RelayListenOverrides } from './libp2p-server-config.js'
+import {
+  resolvePubsubDiscoveryTopic,
+  type RelayListenOverrides,
+} from './libp2p-server-config.js'
+import { filterMultiaddrsForPublicStatus } from './public-multiaddr-filter.js'
 import {
   clientLabel,
   readIpfsGatewayFeatureConfig,
   tryServeIpfsCat,
 } from './ipfs-http-gateway.js'
+
+const PAIR_ROOM_TTL_MS = 120_000
+const pairRooms = new Map<string, { payload: Record<string, unknown>; exp: number }>()
+
+function prunePairRooms(): void {
+  const now = Date.now()
+  for (const [k, v] of pairRooms) {
+    if (v.exp < now) {
+      pairRooms.delete(k)
+    }
+  }
+}
 
 function readControlConfig() {
   const port = Number(process.env.RELAY_CONTROL_HTTP_PORT || process.env.CONTROL_HTTP_PORT || '')
@@ -55,6 +71,24 @@ function authorize(req: http.IncomingMessage, token: string): boolean {
   return false
 }
 
+const MAX_JSON_BODY_BYTES = 16_384
+
+async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of req) {
+    const b = chunk as Buffer
+    total += b.length
+    if (total > MAX_JSON_BODY_BYTES) {
+      throw new Error('body too large')
+    }
+    chunks.push(b)
+  }
+  if (chunks.length === 0) return null
+  const raw = Buffer.concat(chunks).toString('utf8')
+  return JSON.parse(raw) as unknown
+}
+
 function parseRunPath(pathname: string): { kind: 'tcp' | 'ws' | 'quic' | 'webrtc'; port: number } | null {
   const m = pathname.match(/^\/run\/(tcp|ws|quic|webrtc|webrtc-direct)\/(\d{1,5})\/?$/)
   if (!m) return null
@@ -82,7 +116,7 @@ export type ControlHttpServer = {
  * Returns HTTP 202 with JSON, then restarts libp2p on the next event-loop turn (setImmediate).
  * We do not wait for res "finish" before scheduling: in some clients or proxies, finish never
  * fired and the restart never ran. Connection: close on this response avoids sticky keep-alive edge cases.
- * Poll GET /status for new multiaddrs.
+ * Poll GET /status for new multiaddrs (public — no auth).
  */
 export function startControlHttpServer(opts: {
   privateKey: PrivateKey
@@ -133,6 +167,39 @@ export function startControlHttpServer(opts: {
       return
     }
 
+    const pairMatch = pathname.match(/^\/pair\/([^/]+)\/?$/)
+    if (pairMatch != null && (req.method === 'GET' || req.method === 'POST')) {
+      prunePairRooms()
+      const room = decodeURIComponent(pairMatch[1]).slice(0, 256)
+      if (room.length === 0) {
+        sendJson(res, 400, { ok: false, error: 'empty room id' })
+        return
+      }
+      if (req.method === 'GET') {
+        const row = pairRooms.get(room)
+        if (!row || row.exp < Date.now()) {
+          sendJson(res, 404, { ok: false, error: 'not found or expired' })
+          return
+        }
+        sendJson(res, 200, { ok: true, ...row.payload })
+        return
+      }
+      let body: unknown
+      try {
+        body = await readJsonBody(req)
+      } catch {
+        sendJson(res, 400, { ok: false, error: 'Invalid JSON body' })
+        return
+      }
+      const payload =
+        body != null && typeof body === 'object' && body !== null && !Array.isArray(body)
+          ? (body as Record<string, unknown>)
+          : {}
+      pairRooms.set(room, { payload, exp: Date.now() + PAIR_ROOM_TTL_MS })
+      sendJson(res, 200, { ok: true, room, expiresInMs: PAIR_ROOM_TTL_MS })
+      return
+    }
+
     if (req.method === 'GET' && pathname === '/health') {
       if (ipfsFeature.enabled && ipfsFeature.log) {
         console.log(`[ipfs-gateway] GET /health  client=${clientLabel(req)}`)
@@ -151,22 +218,20 @@ export function startControlHttpServer(opts: {
       return
     }
 
-    const authed = authorize(req, cfg.token)
-
     if (req.method === 'GET' && pathname === '/status') {
-      if (!authed) {
-        sendJson(res, 401, { ok: false, error: 'Unauthorized' })
-        return
-      }
       const rt = opts.getRuntime()
+      const allAddrs = rt.libp2p.getMultiaddrs().map((ma) => ma.toString())
       sendJson(res, 200, {
         ok: true,
         peerId: rt.libp2p.peerId.toString(),
         listenOverrides: opts.getOverrides(),
-        multiaddrs: rt.libp2p.getMultiaddrs().map((ma) => ma.toString()),
+        multiaddrs: filterMultiaddrsForPublicStatus(allAddrs),
+        pubsubDiscoveryTopic: resolvePubsubDiscoveryTopic(opts.getOverrides()),
       })
       return
     }
+
+    const authed = authorize(req, cfg.token)
 
     if (!authed) {
       sendJson(res, 401, { ok: false, error: 'Unauthorized' })
@@ -174,6 +239,57 @@ export function startControlHttpServer(opts: {
     }
 
     if (req.method === 'POST') {
+      if (pathname === '/run/pubsub-discovery' || pathname === '/run/pubsub-discovery/') {
+        let body: unknown
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          sendJson(res, 400, { ok: false, error: 'Invalid JSON body' })
+          return
+        }
+        const topic =
+          body != null && typeof body === 'object' && 'topic' in body && typeof (body as { topic: unknown }).topic === 'string'
+            ? (body as { topic: string }).topic.trim()
+            : ''
+        if (topic.length === 0) {
+          sendJson(res, 400, { ok: false, error: 'Missing or empty "topic" string' })
+          return
+        }
+
+        const prev = opts.getOverrides()
+        const next: RelayListenOverrides = { ...prev, pubsubDiscoveryTopic: topic }
+        const rtBefore = opts.getRuntime()
+        res.setHeader('Connection', 'close')
+        sendJson(res, 202, {
+          ok: true,
+          accepted: true,
+          restart: 'pending',
+          peerId: rtBefore.libp2p.peerId.toString(),
+          listenOverrides: next,
+          pubsubDiscoveryTopic: topic,
+          multiaddrsBeforeRestart: rtBefore.libp2p.getMultiaddrs().map((ma) => ma.toString()),
+          hint: 'Libp2p restart is scheduled right after this response. Poll GET /status in ~1s.',
+        })
+
+        setImmediate(() => {
+          void runSerial(async () => {
+            try {
+              console.log(`[control] restart starting: pubsub-discovery topic -> ${topic.slice(0, 80)}`)
+              const old = opts.getRuntime()
+              await old.stop()
+              opts.setOverrides(next)
+              const created = await startRelayRuntime(opts.privateKey, next)
+              opts.setRuntime(created)
+              console.log('[control] restarted libp2p with new pubsub discovery topic')
+              logRelayBanner(created.libp2p)
+            } catch (e) {
+              console.error('[control] libp2p restart failed:', e)
+            }
+          }).catch(() => {})
+        })
+        return
+      }
+
       const run = parseRunPath(pathname)
       if (run) {
         req.resume()
@@ -234,7 +350,8 @@ export function startControlHttpServer(opts: {
     console.log(
       '  POST /run/tcp|ws|quic|webrtc|webrtc-direct/<port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)'
     )
-    console.log('  GET /health  GET /status (auth)')
+    console.log('  GET /health  GET /status (public)  GET|POST /pair/<roomId> (public, short TTL)')
+    console.log('  POST /run/pubsub-discovery  JSON {"topic":"..."}  (auth)')
     if (ipfsFeature.enabled) {
       console.log('  GET /ipfs/<cid>  (no auth — Helia unixfs.cat / bitswap on same libp2p as relay)')
       if (ipfsFeature.log) {

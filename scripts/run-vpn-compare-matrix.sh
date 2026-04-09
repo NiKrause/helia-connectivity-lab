@@ -12,7 +12,7 @@ trap 'rm -f "$JSON"' EXIT
 
 echo "Fetching GET /status from relay over SSH → $JSON (port ${RELAY_CTRL_PORT})"
 ssh -o BatchMode=yes "$RELAY_SSH" \
-  "set -a; [ -f /etc/default/helia-connectivity-lab ] && . /etc/default/helia-connectivity-lab; set +a; curl -fsS -H \"Authorization: Bearer \${RELAY_CONTROL_TOKEN}\" http://127.0.0.1:${RELAY_CTRL_PORT}/status" \
+  "curl -fsS http://127.0.0.1:${RELAY_CTRL_PORT}/status" \
   >"$JSON"
 
 cd "$REPO_ROOT"

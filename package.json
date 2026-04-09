@@ -18,7 +18,10 @@
     "test:transports": "npm run build && node dist/transport-matrix.js",
     "test:helia:local": "npm run build && node dist/helia-local-roundtrip.js",
     "test:helia:remote": "npm run build && node dist/helia-remote-fetch.js",
-    "helia:laptop-provide": "npm run build && node dist/helia-laptop-provide.js"
+    "helia:laptop-provide": "npm run build && node dist/helia-laptop-provide.js",
+    "pwa:dev": "npm run dev --prefix apps/pwa",
+    "pwa:build": "npm run build --prefix apps/pwa",
+    "pwa:check": "npm run check --prefix apps/pwa"
   },
   "dependencies": {
     "@helia/unixfs": "5.1.0",

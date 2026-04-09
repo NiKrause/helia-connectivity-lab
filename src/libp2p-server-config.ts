@@ -1,9 +1,12 @@
+import { gossipsub } from '@chainsafe/libp2p-gossipsub'
 import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { quic } from '@chainsafe/libp2p-quic'
 import { circuitRelayTransport, circuitRelayServer } from '@libp2p/circuit-relay-v2'
+import { dcutr } from '@libp2p/dcutr'
 import { identify, identifyPush } from '@libp2p/identify'
 import { keychain } from '@libp2p/keychain'
+import { pubsubPeerDiscovery } from '@libp2p/pubsub-peer-discovery'
 import { webRTCDirect } from '@libp2p/webrtc'
 import { tcp } from '@libp2p/tcp'
 import { webSockets } from '@libp2p/websockets'
@@ -22,7 +25,21 @@ export type RelayListenEnv = {
   disableQuic: boolean
 }
 
-export type RelayListenOverrides = Partial<RelayListenEnv>
+/** Standard libp2p pubsub peer-discovery topic (see @libp2p/pubsub-peer-discovery). */
+export const DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC = '_peer-discovery._p2p._pubsub'
+
+export type RelayListenOverrides = Partial<RelayListenEnv> & {
+  /** Runtime override; wins over RELAY_PUBSUB_DISCOVERY_TOPIC when set via POST /run/pubsub-discovery. */
+  pubsubDiscoveryTopic?: string
+}
+
+export function resolvePubsubDiscoveryTopic(overrides?: RelayListenOverrides): string {
+  const o = overrides?.pubsubDiscoveryTopic?.trim()
+  if (o) return o
+  const env = process.env.RELAY_PUBSUB_DISCOVERY_TOPIC?.trim()
+  if (env) return env
+  return DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC
+}
 
 /** When true, libp2p needs a persistent `datastore` (Level) + `keychain` + `autoTLS` services. */
 export function readRelayAutoTlsEnabled(): boolean {
@@ -97,6 +114,7 @@ export function createServerLibp2pOptions(
     process.env.RELAY_AUTO_TLS_STAGING === '1' || process.env.RELAY_AUTO_TLS_STAGING === 'true'
 
   const appendAnnounce = readRelayAppendAnnounce()
+  const pubsubTopic = resolvePubsubDiscoveryTopic(overrides)
 
   return {
     privateKey,
@@ -106,11 +124,19 @@ export function createServerLibp2pOptions(
       ...(appendAnnounce.length > 0 ? { appendAnnounce } : {}),
     },
     transports,
+    peerDiscovery: [
+      pubsubPeerDiscovery({
+        interval: 10_000,
+        topics: [pubsubTopic],
+      }),
+    ],
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
     services: {
       identify: identify(),
       identifyPush: identifyPush(),
+      pubsub: gossipsub({ allowPublishToZeroTopicPeers: true }),
+      dcutr: dcutr(),
       relay: circuitRelayServer({
         hopTimeout: 30_000,
         reservations: {

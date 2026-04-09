@@ -2,6 +2,7 @@ import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { quic } from '@chainsafe/libp2p-quic'
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2'
+import { dcutr } from '@libp2p/dcutr'
 import { identify } from '@libp2p/identify'
 import { webRTCDirect } from '@libp2p/webrtc'
 import { tcp } from '@libp2p/tcp'
@@ -41,6 +42,7 @@ export function createClientLibp2pOptions(privateKey: PrivateKey): Record<string
     streamMuxers: [yamux()],
     services: {
       identify: identify(),
+      dcutr: dcutr(),
     },
     connectionGater: {
       denyDialMultiaddr: async () => false,

@@ -14,6 +14,8 @@ type StatusResponse = {
   ok?: boolean
   peerId?: string
   multiaddrs?: string[]
+  pubsubDiscoveryTopic?: string
+  listenOverrides?: Record<string, unknown>
   error?: string
 }
 
@@ -27,8 +29,8 @@ function usage(): never {
   --duration SEC     With --mode bulk: run exactly SEC seconds per transport (overrides default 30s).
   --escalate         With --mode bulk: run 30,60,120,180,300,600s per transport until first failure.
   --message S Echo string (default: same as <label>; mode echo only).
-  --base URL  Control API base for GET /status (env RELAY_CONTROL_BASE).
-  --token S   Bearer token for /status (env RELAY_CONTROL_TOKEN).
+  --base URL  Control API base for GET /status (env RELAY_CONTROL_BASE). /status is public (no auth).
+  --token S   Optional Bearer token (ignored for GET /status; use for POST /run if you script it).
   --status-file PATH   Use JSON from file instead of HTTP (e.g. from SSH curl). Implies no --base/--token needed.
   --dial HOST   Relay’s public IP or DNS name (libp2p destination). Rewrites /ip4/127.0.0.1/ in multiaddrs — NOT your laptop’s IP.
   --show-egress-ip     Look up this machine’s public IP (via api.ipify.org) and print it in the report (VPN before/after checks).
@@ -38,7 +40,7 @@ Examples:
   RELAY_CONTROL_BASE=http://HOST:8008 RELAY_CONTROL_TOKEN=xxx npm run test:transports -- "vpn-off" --dial HOST
 
   # Control only on server (cloud blocks 8008): fetch status over SSH, then test locally:
-  ssh root@HOST 'source /etc/default/helia-connectivity-lab; curl -sS -H "Authorization: Bearer $RELAY_CONTROL_TOKEN" http://127.0.0.1:8008/status' > /tmp/relay-status.json
+  ssh root@HOST 'curl -sS http://127.0.0.1:8008/status' > /tmp/relay-status.json
   npm run test:transports -- "vpn-off" --status-file /tmp/relay-status.json --dial 95.217.163.72
 
   # Bulk random payload echo (same transports), fixed 30s each (default):
@@ -222,11 +224,11 @@ async function bulkLinesForTransport(
 
 async function fetchStatus(base: string, token: string): Promise<StatusResponse> {
   const url = `${base.replace(/\/$/, '')}/status`
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  })
+  const headers: Record<string, string> = {}
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  const res = await fetch(url, { headers })
   const text = await res.text()
   let data: StatusResponse
   try {
@@ -305,8 +307,8 @@ async function main() {
       status.ok = true
     }
   } else {
-    if (!base || !token) {
-      console.error('Use --status-file, or set RELAY_CONTROL_BASE + RELAY_CONTROL_TOKEN for HTTP /status.')
+    if (!base) {
+      console.error('Use --status-file, or set RELAY_CONTROL_BASE for HTTP /status.')
       usage()
     }
     status = await fetchStatus(base, token)

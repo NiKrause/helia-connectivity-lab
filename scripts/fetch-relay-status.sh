@@ -4,4 +4,4 @@
 set -euo pipefail
 HOST="${1:?usage: $0 user@ssh-host}"
 PORT="${RELAY_CTRL_PORT:-88}"
-ssh -o BatchMode=yes "$HOST" "set -a; [ -f /etc/default/helia-connectivity-lab ] && . /etc/default/helia-connectivity-lab; set +a; curl -sS -H \"Authorization: Bearer \${RELAY_CONTROL_TOKEN}\" http://127.0.0.1:${PORT}/status"
+ssh -o BatchMode=yes "$HOST" "curl -sS http://127.0.0.1:${PORT}/status"

@@ -2,7 +2,9 @@
 
 Phase 1: minimal **libp2p** connectivity check between a **relay + echo server** and a **desktop CLI client**. The server runs **circuit relay v2** (`circuitRelayServer`) and two custom protocols: **`/connectivity-echo/1.0.0`** (one-line echo) and **`/connectivity-bulk/1.0.0`** (length-prefixed random payloads echoed back for sustained load tests).
 
-The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in-memory blockstore). Optionally expose **`GET /ipfs/<cid>`** over HTTP(S) so the VPS can **`unixfs.cat`** a CID from the network (e.g. a laptop that dialed in on TCP / WS / QUIC / WebRTC like the rest of the lab). Browser client remains future work.
+The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in-memory blockstore). Optionally expose **`GET /ipfs/<cid>`** over HTTP(S) so the VPS can **`unixfs.cat`** a CID from the network (e.g. a laptop that dialed in on TCP / WS / QUIC / WebRTC like the rest of the lab).
+
+**Browser PWA:** `apps/pwa` — Svelte + Vite + **`vite-plugin-pwa`**. Run **`npm run pwa:dev`** (after **`cd apps/pwa && npm install`**). Set **`VITE_RELAY_HTTP_BASE`** (see `apps/pwa/.env.example`). The app calls public **`GET /health`** / **`GET /status`**, dials the relay over **`/ws`**, runs echo + bulk, **gossipsub + pubsub peer discovery** (topic editable; default **`_peer-discovery._p2p._pubsub`**), **WebRTC-filtered auto `dial(peerId)`**, Helia add + **`GET /ipfs/<cid>`** on the relay, and optional **`/pair/<room>`** for two-browser handoff.
 
 ## TLS / AutoTLS vs cleartext WebSocket
 
@@ -45,11 +47,19 @@ Enable a small **Node HTTP** control server (plain HTTP, separate from libp2p):
 Endpoints:
 
 - **`GET /health`** — no auth; `{"status":"ok","control":true}` (and **`"ipfsGateway":true`** when **`RELAY_IPFS_GATEWAY=1`** — see [IPFS gateway](#optional-ipfs-http-gateway-same-libp2p-as-the-relay)).
-- **`GET /status`** — requires auth; returns `peerId`, active `listenOverrides`, and `multiaddrs`.
-- **`POST /run/tcp/<port>`** — schedules a libp2p stop/start with TCP bound to `<port>`. Responds **`202 Accepted`** with JSON **before** the restart finishes (so slow or crashy restarts do not produce an empty HTTP reply). **Poll `GET /status`** for the new `multiaddrs`. **PeerId stays the same** if you use `RELAY_PRIVATE_KEY_HEX` or `RELAY_KEY_FILE` (recommended on a VPS).
+- **`GET /status`** — **no auth**; returns `peerId`, `listenOverrides`, **`multiaddrs` filtered to public addresses** (no RFC1918 / loopback / typical ULA), and **`pubsubDiscoveryTopic`** (active `@libp2p/pubsub-peer-discovery` topic).
+- **`GET /pair/<roomId>`** / **`POST /pair/<roomId>`** — no auth; ephemeral JSON stash (~2 min TTL) for optional two-browser coordination (body is opaque JSON).
+- **`POST /run/tcp/<port>`** — **requires auth**; schedules a libp2p stop/start with TCP bound to `<port>`. Responds **`202 Accepted`** with JSON **before** the restart finishes (so slow or crashy restarts do not produce an empty HTTP reply). **Poll `GET /status`** for the new `multiaddrs`. **PeerId stays the same** if you use `RELAY_PRIVATE_KEY_HEX` or `RELAY_KEY_FILE` (recommended on a VPS).
 - **`POST /run/ws/<port>`** — same for the **WebSocket** listener port.
 - **`POST /run/quic/<udp-port>`** — same for the **QUIC** (UDP) listener port.
 - **`POST /run/webrtc/<udp-port>`** — same for **WebRTC-Direct** (UDP). **`POST /run/webrtc-direct/<udp-port>`** is an alias (same handler).
+- **`POST /run/pubsub-discovery`** — **requires auth**; JSON body **`{"topic":"<string>"}`** sets the **pubsub peer discovery** topic and restarts libp2p (same **`202`** + poll **`/status`** pattern).
+
+| Variable | Meaning |
+|----------|---------|
+| **`RELAY_PUBSUB_DISCOVERY_TOPIC`** | Initial pubsub peer-discovery topic (default **`_peer-discovery._p2p._pubsub`**). Overridden by **`POST /run/pubsub-discovery`** while the process runs. |
+
+The relay also runs **gossipsub**, **`@libp2p/pubsub-peer-discovery`**, and **`@libp2p/dcutr`** alongside **circuit relay v2**.
 
 Each restart recreates the libp2p node; **WebRTC-Direct** listening addresses (including `certhash`) change even when **PeerId** is stable—re-copy those multiaddrs after a restart if you use WebRTC.
 
@@ -65,14 +75,14 @@ Example (control on 8008, then move libp2p TCP to 81 — **run Node as root** fo
 curl -sS -w '\nHTTP %{http_code}\n' -X POST "http://YOUR_HOST:8008/run/tcp/81" \
   -H "Authorization: Bearer $RELAY_CONTROL_TOKEN"
 # Expect HTTP 202, then:
-curl -sS -H "Authorization: Bearer $RELAY_CONTROL_TOKEN" "http://YOUR_HOST:8008/status"
+curl -sS "http://YOUR_HOST:8008/status"
 ```
 
 **Security:** anyone who can reach the control port and guess the token can rebind listeners. Prefer binding control to **localhost** and using SSH port-forwarding, or firewall the control port to your IP only, and use a long random token.
 
 ## Optional IPFS HTTP gateway (same libp2p as the relay)
 
-When the **control HTTP API** is enabled (**`RELAY_CONTROL_HTTP_PORT`** + **`RELAY_CONTROL_TOKEN`**), **`GET /ipfs/<cid>`** is served on the **same TCP port** as **`GET /health`** and **`GET /status`** — no second HTTP listener. **`GET /ipfs/...` does not require auth** (public read); **`GET /status`** and **`POST /run/...`** still need the Bearer token.
+When the **control HTTP API** is enabled (**`RELAY_CONTROL_HTTP_PORT`** + **`RELAY_CONTROL_TOKEN`**), **`GET /ipfs/<cid>`** is served on the **same TCP port** as **`GET /health`** and **`GET /status`** — no second HTTP listener. **`GET /ipfs/...`** and **`GET /status`** do not require auth (public read). **`POST /run/...`** still needs the Bearer token.
 
 - **`GET /ipfs/<cid>`** — streams **`unixfs.cat`** via **Helia** (bitswap) on the relay’s libp2p node.
 - **`GET /health`** — if the IPFS gateway is enabled, body includes both flags, e.g. `{"status":"ok","control":true,"ipfsGateway":true}`; otherwise `{"status":"ok","control":true}`.
@@ -179,7 +189,7 @@ journalctl -u helia-connectivity-lab -f | grep ipfs-gateway
 - **`[ipfs-gateway]`** — **`cat start`**, **`cat progress`**, **`cat done`** or **`cat error`** for each **`GET /ipfs/<cid>`** (when **`RELAY_IPFS_GATEWAY_LOG=1`**).
 - Boot lines: **Control HTTP listening**, **GET /ipfs/<cid>**, relay **PeerId** and **multiaddrs**.
 
-**401 Unauthorized with a “correct” token:** systemd applies **`EnvironmentFile=` after `Environment=`** and **overrides the same variable name**. If both the unit file and **`/etc/default/helia-connectivity-lab`** set `RELAY_CONTROL_TOKEN`, the **file wins**—the process will not use the token in the unit. Put the token in **one place only** (recommended: `/etc/default/helia-connectivity-lab`). Also use **`GET /status`** (not `POST`); `POST` is only for `/run/...`.
+**401 Unauthorized with a “correct” token:** systemd applies **`EnvironmentFile=` after `Environment=`** and **overrides the same variable name**. If both the unit file and **`/etc/default/helia-connectivity-lab`** set `RELAY_CONTROL_TOKEN`, the **file wins**—the process will not use the token in the unit. Put the token in **one place only** (recommended: `/etc/default/helia-connectivity-lab`). **`GET /status`** is public; **`401`** on **`POST /run/...`** means the token header is missing or wrong.
 
 ## Stable PeerId (recommended with control API)
 
