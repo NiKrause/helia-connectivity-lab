@@ -4,7 +4,7 @@ Phase 1: minimal **libp2p** connectivity check between a **relay + echo server**
 
 The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in-memory blockstore). Optionally expose **`GET /ipfs/<cid>`** over HTTP(S) so the VPS can **`unixfs.cat`** a CID from the network (e.g. a laptop that dialed in on TCP / WS / QUIC / WebRTC like the rest of the lab).
 
-**Browser PWA:** `apps/pwa` — Svelte + Vite + **`vite-plugin-pwa`**. Run **`npm run pwa:dev`** (after **`cd apps/pwa && npm install`**). Set **`VITE_RELAY_HTTP_BASE`** (see `apps/pwa/.env.example`). The app calls public **`GET /health`** / **`GET /status`**, dials the relay over **`/ws`**, runs echo + bulk, **gossipsub + pubsub peer discovery** (topic editable; default **`_peer-discovery._p2p._pubsub`**), **WebRTC-filtered auto `dial(peerId)`**, Helia add + **`GET /ipfs/<cid>`** on the relay, and optional **`/pair/<room>`** for two-browser handoff.
+**Browser PWA:** `apps/pwa` — Svelte + Vite + **`vite-plugin-pwa`**. Run **`npm run pwa:dev`** (after **`cd apps/pwa && npm install`**). Set **`VITE_RELAY_HTTP_BASE`** (see `apps/pwa/.env.example`). The app calls public **`GET /health`** / **`GET /status`**, dials the relay over **`/ws`**, runs echo + bulk, **gossipsub + pubsub peer discovery** (topic editable; default **`_peer-discovery._p2p._pubsub`**), **WebRTC-filtered auto `dial(peerId)`**, and Helia add + **`GET /ipfs/<cid>`** on the relay.
 
 ## TLS / AutoTLS vs cleartext WebSocket
 
@@ -48,7 +48,6 @@ Endpoints:
 
 - **`GET /health`** — no auth; `{"status":"ok","control":true}` (and **`"ipfsGateway":true`** when **`RELAY_IPFS_GATEWAY=1`** — see [IPFS gateway](#optional-ipfs-http-gateway-same-libp2p-as-the-relay)).
 - **`GET /status`** — **no auth**; returns `peerId`, `listenOverrides`, **`multiaddrs` filtered to public addresses** (no RFC1918 / loopback / typical ULA), and **`pubsubDiscoveryTopic`** (active `@libp2p/pubsub-peer-discovery` topic).
-- **`GET /pair/<roomId>`** / **`POST /pair/<roomId>`** — no auth; ephemeral JSON stash (~2 min TTL) for optional two-browser coordination (body is opaque JSON).
 - **`POST /run/tcp/<port>`** — **requires auth**; schedules a libp2p stop/start with TCP bound to `<port>`. Responds **`202 Accepted`** with JSON **before** the restart finishes (so slow or crashy restarts do not produce an empty HTTP reply). **Poll `GET /status`** for the new `multiaddrs`. **PeerId stays the same** if you use `RELAY_PRIVATE_KEY_HEX` or `RELAY_KEY_FILE` (recommended on a VPS).
 - **`POST /run/ws/<port>`** — same for the **WebSocket** listener port.
 - **`POST /run/quic/<udp-port>`** — same for the **QUIC** (UDP) listener port.
@@ -234,8 +233,8 @@ RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_QUIC_PORT=5000 RELAY_WEBRTC_PORT=90
 | `RELAY_AUTO_TLS` | unset | Set to **`1`** to enable **`@ipshipyard/libp2p-auto-tls`** (needs **`RELAY_AUTO_TLS_DATASTORE_PATH`**). |
 | `RELAY_AUTO_TLS_DATASTORE_PATH` | `./libp2p-autotls-data` | Writable directory for LevelDB (certs). Use e.g. **`/var/lib/helia-connectivity-lab/libp2p-datastore`** on a VPS. |
 | `RELAY_AUTO_TLS_STAGING` | unset | Set to **`1`** for Let’s Encrypt **staging** ACME. |
-| `RELAY_APPEND_ANNOUNCE` | unset | Comma-separated multiaddrs **without spaces** to **append** as announced addresses (e.g. public **`/ip4/x/tcp/81`** and **`/ip4/x/tcp/8443/ws`** when the process listens on loopback behind port forwarding). Helps **`GET /status`** and **AutoTLS** see a publicly dialable WS address. |
-| `RELAY_DEBUG` | unset | Appended to **`DEBUG`** before startup (e.g. **`libp2p:auto-tls`** for AutoTLS trace logs). Same as setting **`DEBUG`** yourself; see TLS section above. |
+| `RELAY_APPEND_ANNOUNCE` | unset | Comma-separated multiaddrs **without spaces** to **append** as announced addresses (e.g. public **`/ip4/x/tcp/81`** and **`/ip4/x/tcp/8443/ws`** when the process listens on loopback behind port forwarding). Helps **`GET /status`** and **AutoTLS** see a publicly dialable WS address. **WebRTC-Direct:** the relay often lists WebRTC only on **`/ip4/127.0.0.1/udp/…/webrtc-direct/certhash/…`**; browsers cannot dial that. Copy that line, replace **`127.0.0.1`** with your VPS public IPv4 (keep **`certhash`** and **`/p2p/…`** unchanged), and add it here so **gossipsub peer discovery** and **`GET /status`** expose a public WebRTC multiaddr. |
+| `RELAY_DEBUG` | unset | Appended to **`DEBUG`** before startup. Examples: **`libp2p:circuit-relay*`** (circuit relay v2 server/transport/reservation logs), **`libp2p:auto-tls`** (AutoTLS). Combine with commas. The bundled **`deploy/helia-connectivity-lab.service`** sets **`libp2p:circuit-relay*`** by default. Reservation **accept/refuse** also emits **`[relay-reservation]`** lines to stdout regardless of **`DEBUG`**. |
 
 On start, the server prints **PeerId** and **dialable multiaddrs**. Pick the line that matches the transport you want to test (TCP, `/ws`, **`/tls/ws`** if AutoTLS has run, or `/webrtc-direct/.../certhash/...`).
 

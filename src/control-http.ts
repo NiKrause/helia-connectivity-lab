@@ -13,18 +13,6 @@ import {
   tryServeIpfsCat,
 } from './ipfs-http-gateway.js'
 
-const PAIR_ROOM_TTL_MS = 120_000
-const pairRooms = new Map<string, { payload: Record<string, unknown>; exp: number }>()
-
-function prunePairRooms(): void {
-  const now = Date.now()
-  for (const [k, v] of pairRooms) {
-    if (v.exp < now) {
-      pairRooms.delete(k)
-    }
-  }
-}
-
 function readControlConfig() {
   const port = Number(process.env.RELAY_CONTROL_HTTP_PORT || process.env.CONTROL_HTTP_PORT || '')
   const host = process.env.RELAY_CONTROL_HTTP_HOST || process.env.CONTROL_HTTP_HOST || '0.0.0.0'
@@ -164,39 +152,6 @@ export function startControlHttpServer(opts: {
     if (req.method === 'OPTIONS') {
       res.statusCode = 204
       res.end()
-      return
-    }
-
-    const pairMatch = pathname.match(/^\/pair\/([^/]+)\/?$/)
-    if (pairMatch != null && (req.method === 'GET' || req.method === 'POST')) {
-      prunePairRooms()
-      const room = decodeURIComponent(pairMatch[1]).slice(0, 256)
-      if (room.length === 0) {
-        sendJson(res, 400, { ok: false, error: 'empty room id' })
-        return
-      }
-      if (req.method === 'GET') {
-        const row = pairRooms.get(room)
-        if (!row || row.exp < Date.now()) {
-          sendJson(res, 404, { ok: false, error: 'not found or expired' })
-          return
-        }
-        sendJson(res, 200, { ok: true, ...row.payload })
-        return
-      }
-      let body: unknown
-      try {
-        body = await readJsonBody(req)
-      } catch {
-        sendJson(res, 400, { ok: false, error: 'Invalid JSON body' })
-        return
-      }
-      const payload =
-        body != null && typeof body === 'object' && body !== null && !Array.isArray(body)
-          ? (body as Record<string, unknown>)
-          : {}
-      pairRooms.set(room, { payload, exp: Date.now() + PAIR_ROOM_TTL_MS })
-      sendJson(res, 200, { ok: true, room, expiresInMs: PAIR_ROOM_TTL_MS })
       return
     }
 
@@ -350,7 +305,7 @@ export function startControlHttpServer(opts: {
     console.log(
       '  POST /run/tcp|ws|quic|webrtc|webrtc-direct/<port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)'
     )
-    console.log('  GET /health  GET /status (public)  GET|POST /pair/<roomId> (public, short TTL)')
+    console.log('  GET /health  GET /status (public)')
     console.log('  POST /run/pubsub-discovery  JSON {"topic":"..."}  (auth)')
     if (ipfsFeature.enabled) {
       console.log('  GET /ipfs/<cid>  (no auth — Helia unixfs.cat / bitswap on same libp2p as relay)')

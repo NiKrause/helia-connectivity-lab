@@ -23,16 +23,52 @@ import {
 } from './protocol.js'
 import { readLine, writeLine } from './streamLine.js'
 import { ByteStreamReader, encodeFrame, readFramedChunk } from './streamBinary.js'
-import { multiaddrsIncludeWebRTC } from './webrtcAddrs.js'
+import { multiaddrsIncludePublicDialableWebRTC, webRtcDiscoveryDetail } from './webrtcAddrs.js'
+
+/** How long the PWA shows the green flashing LED after each `peer:discovery` (ms). */
+export const PEER_DISCOVERY_FLASH_MS = 1200
 
 export type DiscoveryRow = {
   peerId: string
+  /** Multiaddrs from the latest `peer:discovery` event payload (for UI tooltip). */
+  discoveryAddrs: string[]
+  /** `Date.now()` value until which the UI shows the flash (exclusive of LED after this). */
+  discoveryFlashUntilMs: number
+  /** True when advertised addrs include a public (non-loopback / non-RFC1918) WebRTC-Direct IPv4 multiaddr. */
   webrtcCapable: boolean
   autoDial: 'skipped' | 'pending' | 'ok' | 'error'
   detail?: string
 }
 
 export type DiscoveryListener = (rows: DiscoveryRow[]) => void
+
+/** Circuit relay v2 client: reservation denied or other reserve failure on a relay peer. */
+export type RelayReservationUiEvent =
+  | { type: 'error'; relayPeerId: string; message: string; at: number }
+  | { type: 'reserved'; relayPeerId: string; at: number }
+
+export type RelayReservationUiListener = (ev: RelayReservationUiEvent) => void
+
+type ReservationStoreInternals = {
+  addRelay: (peerId: { toString: () => string }, type: string) => Promise<unknown>
+  addEventListener: (name: 'relay:created-reservation', fn: (evt: CustomEvent<{ relay: { toString: () => string } }>) => void) => void
+  removeEventListener: (name: 'relay:created-reservation', fn: (evt: CustomEvent<{ relay: { toString: () => string } }>) => void) => void
+}
+
+/** `components` exists at runtime; omitted from public `Libp2p` typings in some versions. */
+type Libp2pInternals = Libp2p & {
+  components: { transportManager: { getTransports: () => unknown[] } }
+}
+
+function findCircuitReservationStore(libp2p: Libp2p): ReservationStoreInternals | null {
+  const transports = (libp2p as Libp2pInternals).components.transportManager.getTransports()
+  for (const t of transports) {
+    if (t != null && typeof t === 'object' && 'reservationStore' in t) {
+      return (t as { reservationStore: ReservationStoreInternals }).reservationStore
+    }
+  }
+  return null
+}
 
 function randomPayload(minLen: number, maxLen: number): Uint8Array {
   const len = Math.floor(Math.random() * (maxLen - minLen + 1)) + minLen
@@ -46,13 +82,25 @@ export class ConnectivityBrowserNode {
   helia: HeliaLibp2p<Libp2p> | null = null
   private topic: string
   private readonly onDiscovery: DiscoveryListener
+  private readonly onRelayReservationUi?: RelayReservationUiListener
   private readonly discoveryMap = new Map<string, DiscoveryRow>()
   private readonly dialing = new Set<string>()
   private discoveryNotifyTimer: ReturnType<typeof setTimeout> | null = null
+  private reservationStoreHooked = false
+  private reservationStoreRef: ReservationStoreInternals | null = null
+  private readonly onRelayCreatedBound: (evt: CustomEvent<{ relay: { toString: () => string } }>) => void
 
-  constructor(topic: string, onDiscovery: DiscoveryListener) {
+  constructor(topic: string, onDiscovery: DiscoveryListener, onRelayReservationUi?: RelayReservationUiListener) {
     this.topic = topic.trim() || DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC
     this.onDiscovery = onDiscovery
+    this.onRelayReservationUi = onRelayReservationUi
+    this.onRelayCreatedBound = (evt) => {
+      this.onRelayReservationUi?.({
+        type: 'reserved',
+        relayPeerId: evt.detail.relay.toString(),
+        at: Date.now(),
+      })
+    }
   }
 
   getTopic(): string {
@@ -107,6 +155,7 @@ export class ConnectivityBrowserNode {
     })
 
     await libp2p.start()
+    this.hookCircuitRelayReservationUi(libp2p)
 
     const helia = await createHelia({
       libp2p,
@@ -120,15 +169,49 @@ export class ConnectivityBrowserNode {
     this.helia = helia
   }
 
+  /**
+   * Wrap circuit-relay transport reservation `addRelay` so reserve failures (e.g. RESERVATION_REFUSED)
+   * reach the UI; listen for successful reservations to clear notices per relay.
+   */
+  private hookCircuitRelayReservationUi(libp2p: Libp2p): void {
+    if (this.reservationStoreHooked || this.onRelayReservationUi == null) return
+    const rs = findCircuitReservationStore(libp2p)
+    if (rs == null) return
+
+    const orig = rs.addRelay.bind(rs)
+    rs.addRelay = async (peerId, type) => {
+      try {
+        return await orig(peerId, type)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes('RESERVATION_REFUSED') || msg.includes('reservation failed')) {
+          this.onRelayReservationUi?.({
+            type: 'error',
+            relayPeerId: peerId.toString(),
+            message: msg,
+            at: Date.now(),
+          })
+        }
+        throw err
+      }
+    }
+
+    rs.addEventListener('relay:created-reservation', this.onRelayCreatedBound)
+    this.reservationStoreRef = rs
+    this.reservationStoreHooked = true
+  }
+
   private async onPeerDiscovered(libp2p: Libp2p, peerIdStr: string, multiaddrs: string[]): Promise<void> {
     if (peerIdStr === libp2p.peerId.toString()) return
 
-    const webrtcCapable = multiaddrsIncludeWebRTC(multiaddrs)
+    const webrtcCapable = multiaddrsIncludePublicDialableWebRTC(multiaddrs)
     const row: DiscoveryRow = {
       peerId: peerIdStr,
+      discoveryAddrs: [...multiaddrs],
+      discoveryFlashUntilMs: Date.now() + PEER_DISCOVERY_FLASH_MS,
       webrtcCapable,
       autoDial: webrtcCapable ? 'pending' : 'skipped',
-      detail: webrtcCapable ? undefined : 'no WebRTC in advertised addrs',
+      detail: webRtcDiscoveryDetail(multiaddrs),
     }
     this.discoveryMap.set(peerIdStr, row)
     this.scheduleDiscoveryNotify()
@@ -159,6 +242,17 @@ export class ConnectivityBrowserNode {
 
   peerCount(): number {
     return this.libp2p?.getPeers().length ?? 0
+  }
+
+  /** Announced listen + derived addresses (WebRTC, circuit, reservations, etc.). */
+  getOwnMultiaddrs(): string[] {
+    const lp = this.libp2p
+    if (lp == null) return []
+    return lp.getMultiaddrs().map((ma) => ma.toString())
+  }
+
+  getLocalPeerId(): string | null {
+    return this.libp2p?.peerId.toString() ?? null
   }
 
   async dialRelay(maStr: string): Promise<void> {
@@ -248,6 +342,16 @@ export class ConnectivityBrowserNode {
   }
 
   async stop(): Promise<void> {
+    if (this.reservationStoreRef != null) {
+      try {
+        this.reservationStoreRef.removeEventListener('relay:created-reservation', this.onRelayCreatedBound)
+      } catch {
+        // ignore
+      }
+      this.reservationStoreRef = null
+    }
+    this.reservationStoreHooked = false
+
     if (this.helia) {
       try {
         await this.helia.stop()

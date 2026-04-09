@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import {
     relayBase as defaultRelayBase,
+    relayAuthHeaders,
     fetchHealth,
     fetchStatus,
     pickBrowserDialMultiaddr,
@@ -10,9 +11,16 @@
     type RelayStatus,
   } from './lib/relayApi'
   import { DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC } from './lib/protocol'
-  import { ConnectivityBrowserNode, type DiscoveryRow } from './lib/browserNode'
+  import {
+    ConnectivityBrowserNode,
+    type DiscoveryRow,
+    type RelayReservationUiEvent,
+  } from './lib/browserNode'
+  import { filterPublicDialMultiaddrs, isPublicDialMultiaddr } from './lib/publicMultiaddrFilter'
 
   let httpBase = $state('')
+  /** Same value as server RELAY_CONTROL_TOKEN when /status is behind auth (legacy relay or reverse proxy). */
+  let controlToken = $state('')
   let topic = $state(DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC)
   let healthOk = $state(false)
   let healthMsg = $state('')
@@ -22,6 +30,8 @@
   let newLabel = $state('')
   let newMa = $state('')
   let discoveryRows = $state<DiscoveryRow[]>([])
+  /** Drives flash expiry so the LED hides without mutating discovery rows. */
+  let discoveryNowMs = $state(Date.now())
   let peersCount = $state(0)
   let autoEchoResult = $state('')
   let node = $state<ConnectivityBrowserNode | null>(null)
@@ -30,18 +40,24 @@
   let bulkDuration = $state(30)
   let bulkMin = $state(512)
   let bulkMax = $state(8192)
+  /** When true, Multiaddrs table lists all relay /status addresses, including loopback / RFC1918. */
+  let showHiddenRelayAddrs = $state(false)
+  /** When true, show this browser libp2p node’s own multiaddrs (circuit, WebRTC, …). */
+  let showOwnMultiaddrs = $state(false)
+  let ownMultiaddrs = $state<string[]>([])
+  /** Last circuit-relay reservation failure (e.g. RESERVATION_REFUSED from relay). */
+  let relayReservationBanner = $state<{ relayPeerId: string; message: string; at: number } | null>(null)
   let bulkAbort: AbortController | null = null
   let bulkResult = $state('')
   let heliaCid = $state('')
   let gatewayCid = $state('')
   let gatewayResult = $state('')
-  let pairRoom = $state('')
-  let pairJson = $state('{"peerId":"","multiaddrs":[]}')
-  let pairOut = $state('')
 
   function loadStorage(): void {
     const b = localStorage.getItem('relayHttpBase')
     if (b) httpBase = b
+    const tok = localStorage.getItem('relayControlToken')
+    if (tok) controlToken = tok
     const t = localStorage.getItem('pubsubTopic')
     if (t) topic = t
     const c = localStorage.getItem('customMultiaddrs')
@@ -59,21 +75,77 @@
     localStorage.setItem('relayHttpBase', httpBase.trim())
   }
 
+  function persistControlToken(): void {
+    const t = controlToken.trim()
+    if (t) {
+      localStorage.setItem('relayControlToken', t)
+    } else {
+      localStorage.removeItem('relayControlToken')
+    }
+  }
+
+  function normalizedTopic(): string {
+    const t = (topic ?? '').trim()
+    return t || DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC
+  }
+
   function persistTopic(): void {
-    localStorage.setItem('pubsubTopic', topic.trim())
+    localStorage.setItem('pubsubTopic', normalizedTopic())
   }
 
   function persistCustom(): void {
     localStorage.setItem('customMultiaddrs', JSON.stringify(customRows))
   }
 
+  /** Tooltip for the peer cell: last `peer:discovery` payload. */
+  function peerDiscoveryLedTooltip(addrs: string[]): string {
+    if (addrs.length === 0) return 'peer:discovery — no multiaddrs in payload'
+    return `peer:discovery (${addrs.length} multiaddr${addrs.length === 1 ? '' : 's'}):\n${addrs.join('\n')}`
+  }
+
+  function handleRelayReservationUi(ev: RelayReservationUiEvent): void {
+    if (ev.type === 'error') {
+      relayReservationBanner = { relayPeerId: ev.relayPeerId, message: ev.message, at: ev.at }
+    } else if (ev.type === 'reserved' && relayReservationBanner?.relayPeerId === ev.relayPeerId) {
+      relayReservationBanner = null
+    }
+  }
+
+  function createBrowserNode(): ConnectivityBrowserNode {
+    return new ConnectivityBrowserNode(
+      normalizedTopic(),
+      (rows) => {
+        discoveryRows = rows
+      },
+      handleRelayReservationUi
+    )
+  }
+
+  $effect(() => {
+    discoveryRows
+    const untilMax = discoveryRows.reduce((m, r) => Math.max(m, r.discoveryFlashUntilMs ?? 0), 0)
+    const t0 = Date.now()
+    if (untilMax <= t0) {
+      discoveryNowMs = t0
+      return
+    }
+    discoveryNowMs = t0
+    const id = setInterval(() => {
+      const n = Date.now()
+      discoveryNowMs = n
+      if (n >= untilMax) clearInterval(id)
+    }, 48)
+    return () => clearInterval(id)
+  })
+
   async function refreshHttp(): Promise<void> {
     statusErr = ''
     const base = httpBase.trim() || defaultRelayBase()
-    const h = await fetchHealth(base)
+    const tok = controlToken.trim() || null
+    const h = await fetchHealth(base, tok)
     healthOk = h.ok
     healthMsg = h.error ?? (h.raw ? JSON.stringify(h.raw) : '')
-    const st = await fetchStatus(base)
+    const st = await fetchStatus(base, tok)
     if (st.ok) {
       status = st.data
     } else {
@@ -84,27 +156,34 @@
 
   async function ensureNode(): Promise<ConnectivityBrowserNode> {
     if (node == null) {
-      const n = new ConnectivityBrowserNode(topic, (rows) => {
-        discoveryRows = rows
-      })
+      const n = createBrowserNode()
       await n.start()
       node = n
     }
     return node
   }
 
+  function relayPublicMultiaddrs(): string[] {
+    return filterPublicDialMultiaddrs(status?.multiaddrs ?? [])
+  }
+
+  /** Multiaddr used by "Dial relay" / auto-dial: TLS+WS preferred, else first public `/ws`. */
+  const pickedRelayDialMa = $derived.by((): string | null => {
+    if (!status) return null
+    return pickBrowserDialMultiaddr(relayPublicMultiaddrs())
+  })
+
   async function applyTopicAndReconnect(): Promise<void> {
     busy = true
     try {
       persistTopic()
-      const pick = status ? pickBrowserDialMultiaddr(status.multiaddrs) : null
+      const pick = status ? pickBrowserDialMultiaddr(relayPublicMultiaddrs()) : null
       if (node) {
         await node.stop()
         node = null
+        relayReservationBanner = null
       }
-      const n = new ConnectivityBrowserNode(topic, (rows) => {
-        discoveryRows = rows
-      })
+      const n = createBrowserNode()
       await n.start()
       node = n
       if (pick) {
@@ -116,9 +195,9 @@
   }
 
   async function dialRelayOnly(): Promise<void> {
-    const pick = status ? pickBrowserDialMultiaddr(status.multiaddrs) : null
+    const pick = status ? pickBrowserDialMultiaddr(relayPublicMultiaddrs()) : null
     if (!pick) {
-      autoEchoResult = 'no /ws multiaddr'
+      autoEchoResult = 'no WebSocket multiaddr in public /status'
       return
     }
     busy = true
@@ -208,6 +287,11 @@
     }
   }
 
+  function currentAuthToken(): string | null {
+    const t = controlToken.trim()
+    return t ? t : null
+  }
+
   async function fetchGateway(): Promise<void> {
     const base = (httpBase.trim() || defaultRelayBase()).replace(/\/$/, '')
     const c = gatewayCid.trim()
@@ -217,7 +301,9 @@
     }
     gatewayResult = 'fetching…'
     try {
-      const r = await fetch(`${base}/ipfs/${encodeURIComponent(c)}`)
+      const r = await fetch(`${base}/ipfs/${encodeURIComponent(c)}`, {
+        headers: relayAuthHeaders(currentAuthToken()),
+      })
       const buf = await r.arrayBuffer()
       gatewayResult = `HTTP ${r.status} ${r.ok ? 'ok' : ''} ${buf.byteLength} bytes (gateway may 404 if relay does not have block)`
     } catch (e) {
@@ -225,51 +311,16 @@
     }
   }
 
-  async function pairPost(): Promise<void> {
-    const base = (httpBase.trim() || defaultRelayBase()).replace(/\/$/, '')
-    const room = pairRoom.trim()
-    if (!room) {
-      pairOut = 'set room id'
-      return
-    }
-    let body: unknown
-    try {
-      body = JSON.parse(pairJson)
-    } catch {
-      pairOut = 'invalid JSON'
-      return
-    }
-    try {
-      const r = await fetch(`${base}/pair/${encodeURIComponent(room)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      pairOut = await r.text()
-    } catch (e) {
-      pairOut = e instanceof Error ? e.message : String(e)
-    }
-  }
-
-  async function pairGet(): Promise<void> {
-    const base = (httpBase.trim() || defaultRelayBase()).replace(/\/$/, '')
-    const room = pairRoom.trim()
-    if (!room) {
-      pairOut = 'set room id'
-      return
-    }
-    try {
-      const r = await fetch(`${base}/pair/${encodeURIComponent(room)}`)
-      pairOut = await r.text()
-    } catch (e) {
-      pairOut = e instanceof Error ? e.message : String(e)
-    }
-  }
+  const relayHiddenLocalCount = $derived(
+    (status?.multiaddrs?.length ?? 0) - filterPublicDialMultiaddrs(status?.multiaddrs ?? []).length
+  )
 
   const allRows = $derived.by(() => {
-    const fromStatus = (status?.multiaddrs ?? []).map((ma) => ({
+    const addrs = status?.multiaddrs ?? []
+    const relayAddrs = showHiddenRelayAddrs ? addrs : filterPublicDialMultiaddrs(addrs)
+    const fromStatus = relayAddrs.map((ma) => ({
       id: `s-${ma}`,
-      label: 'relay',
+      label: showHiddenRelayAddrs && !isPublicDialMultiaddr(ma) ? 'relay (local)' : 'relay',
       ma,
       source: 'relay' as const,
     }))
@@ -277,9 +328,13 @@
     return [...fromStatus, ...fromCustom]
   })
 
-  const topicDrift = $derived(
-    status != null && topic.trim() !== status.pubsubDiscoveryTopic ? true : false
-  )
+  const topicDrift = $derived.by(() => {
+    if (status == null) return false
+    const local = normalizedTopic()
+    const relay = (status.pubsubDiscoveryTopic ?? '').trim()
+    if (!relay) return false
+    return local !== relay
+  })
 
   onMount(() => {
     loadStorage()
@@ -288,11 +343,12 @@
     void (async () => {
       await refreshHttp()
       if (status && !localStorage.getItem('pubsubTopic')) {
-        topic = status.pubsubDiscoveryTopic
+        topic =
+          status.pubsubDiscoveryTopic?.trim() || DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC
       }
       try {
         const n = await ensureNode()
-        const pick = status ? pickBrowserDialMultiaddr(status.multiaddrs) : null
+        const pick = status ? pickBrowserDialMultiaddr(relayPublicMultiaddrs()) : null
         if (pick) {
           await n.dialRelay(pick)
           const { reply, ms } = await n.runEcho(pick, 'pwa-auto')
@@ -306,7 +362,10 @@
     })()
 
     const iv = setInterval(() => {
-      if (node) peersCount = node.peerCount()
+      if (node) {
+        peersCount = node.peerCount()
+        ownMultiaddrs = node.getOwnMultiaddrs()
+      }
     }, 800)
     return () => clearInterval(iv)
   })
@@ -320,8 +379,29 @@
   <div class="row">
     <label for="base">Base URL</label>
     <input id="base" type="text" bind:value={httpBase} placeholder={defaultRelayBase()} />
-    <button type="button" onclick={() => { persistBase(); void refreshHttp() }}>Save &amp; refresh</button>
+    <button
+      type="button"
+      onclick={() => {
+        persistBase()
+        persistControlToken()
+        void refreshHttp()
+      }}>Save &amp; refresh</button>
   </div>
+  <div class="row">
+    <label for="token">Control token</label>
+    <input
+      id="token"
+      type="password"
+      bind:value={controlToken}
+      placeholder="RELAY_CONTROL_TOKEN (optional)"
+      autocomplete="off"
+    />
+    <button type="button" onclick={() => { controlToken = ''; persistControlToken(); void refreshHttp() }}>Clear token</button>
+  </div>
+  <p class="sub" style="margin:0 0 0.75rem">
+    Latest relay: <code>GET /status</code> is public. If you see <strong>401</strong>, paste the same secret as
+    <code>RELAY_CONTROL_TOKEN</code> (sent as <code>Authorization: Bearer …</code> and <code>X-Control-Token</code>).
+  </p>
   <div class="row">
     <span class="pill">health: {#if healthOk}<span class="badge ok">ok</span>{:else}<span class="badge bad">down</span>{/if}</span>
     {#if healthMsg}<span class="muted">{healthMsg}</span>{/if}
@@ -340,29 +420,29 @@
 </section>
 
 <section class="panel">
-  <h2>Pubsub discovery topic</h2>
-  <div class="row">
-    <input type="text" bind:value={topic} placeholder={DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC} />
-    <button type="button" onclick={() => { topic = DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC }}>Reset default</button>
-    <button type="button" onclick={() => { if (status) topic = status.pubsubDiscoveryTopic }}>Sync from relay</button>
-    <button type="button" disabled={busy} onclick={() => void applyTopicAndReconnect()}>Apply &amp; recreate node</button>
-  </div>
-  {#if topicDrift}
-    <p class="badge warn">Local topic differs from relay — discovery may not match.</p>
+  <h2>Relay's Multiaddrs</h2>
+  {#if relayHiddenLocalCount > 0}
+    <div class="row" style="align-items:flex-start;flex-wrap:wrap;gap:0.5rem;margin:0 0 0.75rem">
+      <p class="sub" style="margin:0;flex:1;min-width:12rem">
+        {#if showHiddenRelayAddrs}
+          Showing <strong>all</strong> relay addresses from <code>/status</code> (including
+          <strong>{relayHiddenLocalCount}</strong> not publicly dialable). Custom rows unchanged.
+        {:else}
+          Hiding <strong>{relayHiddenLocalCount}</strong> relay address(es) that are not publicly dialable (e.g.
+          <code>127.0.0.1</code>, RFC1918, link-local IPv6). Custom rows are unchanged.
+        {/if}
+      </p>
+      <button
+        type="button"
+        aria-pressed={showHiddenRelayAddrs}
+        onclick={() => {
+          showHiddenRelayAddrs = !showHiddenRelayAddrs
+        }}
+      >
+        {showHiddenRelayAddrs ? 'Hide' : 'Show'} local / non-public ({relayHiddenLocalCount})
+      </button>
+    </div>
   {/if}
-</section>
-
-<section class="panel">
-  <h2>libp2p node</h2>
-  <div class="row">
-    <span class="pill">connected peers: <strong>{peersCount}</strong></span>
-    <button type="button" disabled={busy} onclick={() => void dialRelayOnly()}>Dial relay (/ws)</button>
-  </div>
-  <p class="sub" style="margin:0.5rem 0 0">Auto echo on load: {autoEchoResult}</p>
-</section>
-
-<section class="panel">
-  <h2>Multiaddrs</h2>
   <div class="row">
     <input type="text" bind:value={newLabel} placeholder="label" />
     <input type="text" bind:value={newMa} placeholder="/ip4/.../ws/p2p/..." />
@@ -412,12 +492,117 @@
 </section>
 
 <section class="panel">
-  <h2>Pubsub discovery (WebRTC auto-dial)</h2>
+  <h2>Browser libp2p node</h2>
+  <div class="row">
+    <span class="pill">connected peers: <strong>{peersCount}</strong></span>
+    <button
+      type="button"
+      disabled={busy}
+      title={pickedRelayDialMa
+        ? `Dials this multiaddr via the browser WebSocket API (${pickedRelayDialMa.includes('/tls/') ? 'wss://' : 'ws://'} after multiaddr→URI).`
+        : 'Fetch /status first — needs a /ws multiaddr in relay addresses.'}
+      onclick={() => void dialRelayOnly()}
+    >
+      {#if pickedRelayDialMa}
+        Dial relay — {transportLabel(pickedRelayDialMa)}
+      {:else}
+        Dial relay (no WS in /status)
+      {/if}
+    </button>
+  </div>
+  {#if relayReservationBanner}
+    <div
+      class="row"
+      style="align-items:flex-start;flex-wrap:wrap;margin-top:0.65rem;gap:0.5rem"
+    >
+      <p class="badge warn" style="margin:0;flex:1;min-width:14rem;text-align:left">
+        <strong>Circuit relay reservation failed</strong> on relay{' '}
+        <code class="ma">{relayReservationBanner.relayPeerId}</code>
+        <span class="sub" style="display:block;margin-top:0.35rem;font-size:0.82rem;white-space:pre-wrap"
+          >{relayReservationBanner.message}</span
+        >
+      </p>
+      <button type="button" onclick={() => { relayReservationBanner = null }}>Dismiss</button>
+    </div>
+  {/if}
+  <p class="sub" style="margin:0.5rem 0 0">Auto echo on load: {autoEchoResult}</p>
+  <div class="row" style="margin-top:0.65rem">
+    <button
+      type="button"
+      aria-pressed={showOwnMultiaddrs}
+      onclick={() => {
+        showOwnMultiaddrs = !showOwnMultiaddrs
+        if (node) ownMultiaddrs = node.getOwnMultiaddrs()
+      }}
+    >
+      {showOwnMultiaddrs ? 'Hide' : 'Show'} my multiaddrs
+    </button>
+    {#if node?.getLocalPeerId()}
+      <span class="sub" style="margin:0;font-size:0.82rem"
+        >This peer: <code class="ma">{node.getLocalPeerId()}</code></span
+      >
+    {/if}
+  </div>
+  {#if showOwnMultiaddrs}
+    {#if ownMultiaddrs.length === 0}
+      <p class="sub" style="margin:0.4rem 0 0">No addresses yet (node starting or stopped).</p>
+    {:else}
+      <table class="table-compact" style="margin-top:0.45rem">
+        <thead>
+          <tr>
+            <th>Transport</th>
+            <th>Multiaddr</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each ownMultiaddrs as ma (ma)}
+            <tr>
+              <td><span class="badge">{transportLabel(ma)}</span></td>
+              <td class="ma">{ma}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  {/if}
+</section>
+
+<section class="panel">
+  <h2>PubSub peer discovery</h2>
+  <div class="row">
+    <label for="pubsubTopic">Discovery topic</label>
+    <input
+      id="pubsubTopic"
+      type="text"
+      bind:value={topic}
+      placeholder={DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC}
+    />
+    <button type="button" onclick={() => { topic = DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC }}>Reset default</button>
+    <button
+      type="button"
+      title="Copies pubsubDiscoveryTopic from the relay’s last GET /status (use Save &amp; refresh first). Does not restart the browser node — use Apply &amp; recreate node for that."
+      onclick={() => {
+        if (status) {
+          topic =
+            status.pubsubDiscoveryTopic?.trim() || DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC
+        }
+      }}>Sync from relay</button>
+    <button type="button" disabled={busy} onclick={() => void applyTopicAndReconnect()}>Apply &amp; recreate node</button>
+  </div>
+  {#if topicDrift}
+    <p class="badge warn">Local topic differs from relay — discovery may not match.</p>
+  {/if}
+  <p class="sub" style="margin:0.75rem 0 0.75rem">
+    Peers from gossipsub on your discovery topic. Auto WebRTC dial runs only when their advertised multiaddrs include a
+    <strong>public</strong> WebRTC-Direct address (not <code>127.0.0.1</code> / RFC1918). Relay <code>GET /status</code> and
+    gossipsub use the same announced listen set — WebRTC often stays on loopback until you add a public variant via
+    <code>RELAY_APPEND_ANNOUNCE</code>.
+  </p>
   <table>
     <thead>
       <tr>
         <th>Peer</th>
-        <th>WebRTC addrs?</th>
+        <th>Public WebRTC?</th>
         <th>Auto-dial</th>
         <th>Detail</th>
       </tr>
@@ -425,7 +610,14 @@
     <tbody>
       {#each discoveryRows as d (d.peerId)}
         <tr>
-          <td class="ma">{d.peerId}</td>
+          <td class="ma">
+            <span class="peer-discovery-led-wrap" title={peerDiscoveryLedTooltip(d.discoveryAddrs)}>
+              {#if d.discoveryFlashUntilMs > discoveryNowMs}
+                <span class="peer-discovery-led-flash" aria-hidden="true"></span>
+              {/if}
+              <span>{d.peerId}</span>
+            </span>
+          </td>
           <td>{d.webrtcCapable ? 'yes' : 'no'}</td>
           <td><span class="badge" class:ok={d.autoDial === 'ok'} class:bad={d.autoDial === 'error'}>{d.autoDial}</span></td>
           <td class="ma">{d.detail ?? ''}</td>
@@ -467,19 +659,5 @@
   </div>
   {#if gatewayResult}
     <p class="ma">{gatewayResult}</p>
-  {/if}
-</section>
-
-<section class="panel">
-  <h2>Pairing room (ephemeral)</h2>
-  <p class="sub">Public <code>POST /pair/&lt;room&gt;</code> JSON body, then <code>GET</code> from another client. ~2 min TTL.</p>
-  <div class="row">
-    <input type="text" bind:value={pairRoom} placeholder="room id" />
-    <button type="button" onclick={() => void pairPost()}>POST</button>
-    <button type="button" onclick={() => void pairGet()}>GET</button>
-  </div>
-  <textarea bind:value={pairJson} rows="4" style="width:100%; margin-top:0.5rem"></textarea>
-  {#if pairOut}
-    <pre class="ma" style="white-space:pre-wrap">{pairOut}</pre>
   {/if}
 </section>

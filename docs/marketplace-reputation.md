@@ -49,7 +49,3 @@ This document sketches a **business model** (no on-chain implementation in the c
 - **Open standards:** Limited; attestation APIs are often proprietary.
 - **Decentralisation:** Poor fit for a credibly neutral marketplace unless strictly optional and clearly labelled.
 - **ZK:** Rarely applicable in a user-friendly way; included here as a **contrast** to open, community-verifiable approaches.
-
-## Pairing API note
-
-The relay exposes simple **`GET/POST /pair/<roomId>`** (short TTL) for ad hoc handoff between two browsers. It is **not** a reputation layer; it is only a convenience transport for exchanging peer hints before libp2p/WebRTC completes.

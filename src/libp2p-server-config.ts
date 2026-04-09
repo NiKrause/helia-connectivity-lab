@@ -47,7 +47,11 @@ export function readRelayAutoTlsEnabled(): boolean {
   return v === '1' || v === 'true'
 }
 
-/** Comma-separated full multiaddrs (no spaces), e.g. `/ip4/PUBLIC/tcp/81,/ip4/PUBLIC/tcp/8443/ws` — helps AutoTLS and clients when listen addrs are loopback-only behind NAT. */
+/**
+ * Comma-separated full multiaddrs (no spaces), e.g. `/ip4/PUBLIC/tcp/81,/ip4/PUBLIC/tcp/8443/ws` — helps AutoTLS and
+ * clients when listen addrs are loopback-only behind NAT. For **WebRTC-Direct**, copy the full `/udp/.../webrtc-direct/certhash/.../p2p/...`
+ * line from boot logs or `GET /status`, replace `/ip4/127.0.0.1/` with `/ip4/YOUR_PUBLIC_VPS/`, and append here so browsers see a dialable host.
+ */
 export function readRelayAppendAnnounce(): string[] {
   const raw = process.env.RELAY_APPEND_ANNOUNCE?.trim()
   if (!raw) return []

@@ -12,6 +12,7 @@ import {
   type RelayListenOverrides,
 } from './libp2p-server-config.js'
 import { attachLibp2pConnectionLogging, libp2pConnLogEnabledForRelay } from './libp2p-connection-log.js'
+import { attachRelayReservationConsoleLog } from './relay-reservation-console.js'
 import { BULK_MAX_CHUNK_BYTES } from './bulk-constants.js'
 import { CONNECTIVITY_BULK_PROTOCOL, CONNECTIVITY_ECHO_PROTOCOL } from './protocol.js'
 import { ByteStreamReader, encodeFrame, readFramedChunk } from './stream-binary.js'
@@ -106,6 +107,7 @@ export async function startRelayRuntime(privateKey: PrivateKey, overrides?: Rela
     start: false,
   })
   await helia.start()
+  attachRelayReservationConsoleLog(libp2p)
 
   return {
     libp2p,

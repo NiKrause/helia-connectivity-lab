@@ -166,6 +166,19 @@ th {
   font-weight: 500;
 }
 
+table.table-compact {
+  font-size: 0.72rem;
+}
+
+table.table-compact th,
+table.table-compact td {
+  padding: 0.28rem 0.4rem;
+}
+
+table.table-compact .ma {
+  font-size: 0.68rem;
+}
+
 .ma {
   font-family: var(--mono);
   word-break: break-all;
@@ -195,6 +208,36 @@ th {
   font-size: 0.78rem;
   background: var(--panel);
   border: 1px solid var(--panel-border);
+}
+
+.peer-discovery-led-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  vertical-align: middle;
+  cursor: help;
+}
+
+.peer-discovery-led-flash {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.95);
+  animation: peer-discovery-led-pulse 0.28s ease-in-out infinite alternate;
+}
+
+@keyframes peer-discovery-led-pulse {
+  from {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @media (max-width: 640px) {

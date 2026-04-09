@@ -1,5 +1,6 @@
 /**
- * Filter relay listen multiaddrs for public GET /status (no RFC1918 / loopback / link-local).
+ * Same rules as relay src/public-multiaddr-filter.ts — only public dial-relevant multiaddrs.
+ * Applied in the PWA so local rows never appear even if an older relay returns them.
  */
 
 function isPublicIPv4(host: string): boolean {
@@ -17,13 +18,11 @@ function isPublicIPv4(host: string): boolean {
   return true
 }
 
-/** True if this multiaddr string should appear in public /status. */
-export function isPublicStatusMultiaddr(maStr: string): boolean {
+export function isPublicDialMultiaddr(maStr: string): boolean {
   const s = maStr.trim()
   if (s.length === 0) return false
 
-  const ip4Blocks = s.matchAll(/\/ip4\/([^/]+)/g)
-  for (const m of ip4Blocks) {
+  for (const m of s.matchAll(/\/ip4\/([^/]+)/g)) {
     if (!isPublicIPv4(m[1])) return false
   }
 
@@ -37,6 +36,6 @@ export function isPublicStatusMultiaddr(maStr: string): boolean {
   return true
 }
 
-export function filterMultiaddrsForPublicStatus(addrs: string[]): string[] {
-  return addrs.filter(isPublicStatusMultiaddr)
+export function filterPublicDialMultiaddrs(addrs: string[]): string[] {
+  return addrs.filter(isPublicDialMultiaddr)
 }
