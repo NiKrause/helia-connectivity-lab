@@ -50,3 +50,23 @@ export function webRtcDiscoveryDetail(addrs: string[]): string | undefined {
     'in gossipsub. Copy the listen line, swap the IP for your VPS public address, and set RELAY_APPEND_ANNOUNCE (same certhash).'
   )
 }
+
+/** True if an advertised multiaddr includes a circuit path to the target peer (typical after a reservation). */
+export function multiaddrsIncludeCircuitHop(addrs: string[]): boolean {
+  return addrs.some((s) => s.includes('/p2p-circuit/p2p/'))
+}
+
+/** Whether we should run auto <code>dial(peerId)</code> from a pubsub-peer-discovery payload. */
+export function discoveryAutoDialEligible(addrs: string[]): boolean {
+  return multiaddrsIncludePublicDialableWebRTC(addrs) || multiaddrsIncludeCircuitHop(addrs)
+}
+
+/** Reason we skip auto-dial when {@link discoveryAutoDialEligible} is false. */
+export function discoveryAutoDialDetail(addrs: string[]): string | undefined {
+  if (discoveryAutoDialEligible(addrs)) return undefined
+  if (multiaddrsIncludeWebRTC(addrs)) return webRtcDiscoveryDetail(addrs)
+  if (addrs.some((s) => s.includes('/p2p-circuit'))) {
+    return 'circuit segment present but not /p2p-circuit/p2p/… (unexpected shape)'
+  }
+  return 'no public WebRTC-Direct or circuit-relay path in advertised addrs'
+}
