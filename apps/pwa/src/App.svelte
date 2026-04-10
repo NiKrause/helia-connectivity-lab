@@ -5,6 +5,7 @@
     relayAuthHeaders,
     fetchHealth,
     fetchStatus,
+    isLocalRelayHttpBase,
     pickBrowserDialMultiaddr,
     transportLabel,
     canBrowserDialMultiaddr,
@@ -13,6 +14,7 @@
   import { DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC } from './lib/protocol'
   import {
     ConnectivityBrowserNode,
+    PEER_DISCOVERY_FLASH_MS,
     type DiscoveryRow,
     type RelayReservationUiEvent,
   } from './lib/browserNode'
@@ -32,6 +34,16 @@
   let discoveryRows = $state<DiscoveryRow[]>([])
   /** Drives flash expiry so the LED hides without mutating discovery rows. */
   let discoveryNowMs = $state(Date.now())
+  /** Orange LED: we successfully gossipsub-published our pubsub-peer-discovery payload. */
+  let pubsubSelfPublishFlashUntilMs = $state(0)
+  /** Cyan LED: inbound discovery advert signed by the relay (`GET /status` peer id). */
+  let pubsubRelayRecvFlashUntilMs = $state(0)
+  /** Violet LED: inbound discovery advert from some other libp2p peer (e.g. another browser). */
+  let pubsubRemoteRecvFlashUntilMs = $state(0)
+  /** Synced from `status.peerId` so pubsub hooks classify relay vs peer without stale closures. */
+  let relayPeerIdForPubsubLeds = $state('')
+  /** Last gossipsub message `from` (signer) on the discovery topic — verifies who you actually hear. */
+  let lastInboundPubsubDiscoveryFrom = $state('')
   let peersCount = $state(0)
   let autoEchoResult = $state('')
   let node = $state<ConnectivityBrowserNode | null>(null)
@@ -89,6 +101,10 @@
     return t || DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC
   }
 
+  function effectiveRelayBase(): string {
+    return httpBase.trim() || defaultRelayBase()
+  }
+
   function persistTopic(): void {
     localStorage.setItem('pubsubTopic', normalizedTopic())
   }
@@ -103,6 +119,11 @@
     return `peer:discovery (${addrs.length} multiaddr${addrs.length === 1 ? '' : 's'}):\n${addrs.join('\n')}`
   }
 
+  function isRelayDiscoveryPeer(peerId: string): boolean {
+    const relayId = (status?.peerId ?? '').trim()
+    return relayId !== '' && peerId === relayId
+  }
+
   function handleRelayReservationUi(ev: RelayReservationUiEvent): void {
     if (ev.type === 'error') {
       relayReservationBanner = { relayPeerId: ev.relayPeerId, message: ev.message, at: ev.at }
@@ -114,16 +135,46 @@
   function createBrowserNode(): ConnectivityBrowserNode {
     return new ConnectivityBrowserNode(
       normalizedTopic(),
+      relayBootstrapAddrs(),
       (rows) => {
         discoveryRows = rows
       },
-      handleRelayReservationUi
+      handleRelayReservationUi,
+      {
+        onDiscoveryAdvertPublished: () => {
+          pubsubSelfPublishFlashUntilMs = Date.now() + PEER_DISCOVERY_FLASH_MS
+        },
+        onRemoteDiscoveryAdvertReceived: (info) => {
+          lastInboundPubsubDiscoveryFrom = info.fromPeerId
+          const t = Date.now() + PEER_DISCOVERY_FLASH_MS
+          const relayId = relayPeerIdForPubsubLeds
+          if (relayId !== '' && info.fromPeerId === relayId) {
+            pubsubRelayRecvFlashUntilMs = t
+          } else {
+            pubsubRemoteRecvFlashUntilMs = t
+          }
+        },
+      }
     )
   }
 
   $effect(() => {
-    discoveryRows
-    const untilMax = discoveryRows.reduce((m, r) => Math.max(m, r.discoveryFlashUntilMs ?? 0), 0)
+    relayPeerIdForPubsubLeds = (status?.peerId ?? '').trim()
+  })
+
+  /** Only changes when the latest row flash deadline changes — avoids resetting the LED ticker on every discovery table refresh. */
+  const discoveryRowFlashMax = $derived.by(() =>
+    discoveryRows.reduce((m, r) => Math.max(m, r.discoveryFlashUntilMs ?? 0), 0)
+  )
+
+  $effect(() => {
+    /** Single expression so every flash input is a real reactive read (bare statements can be dropped / not tracked). */
+    const untilMax = Math.max(
+      discoveryRowFlashMax,
+      pubsubSelfPublishFlashUntilMs,
+      pubsubRelayRecvFlashUntilMs,
+      pubsubRemoteRecvFlashUntilMs
+    )
     const t0 = Date.now()
     if (untilMax <= t0) {
       discoveryNowMs = t0
@@ -140,7 +191,7 @@
 
   async function refreshHttp(): Promise<void> {
     statusErr = ''
-    const base = httpBase.trim() || defaultRelayBase()
+    const base = effectiveRelayBase()
     const tok = controlToken.trim() || null
     const h = await fetchHealth(base, tok)
     healthOk = h.ok
@@ -167,21 +218,32 @@
     return filterPublicDialMultiaddrs(status?.multiaddrs ?? [])
   }
 
+  function relayDialMultiaddrs(): string[] {
+    const addrs = status?.multiaddrs ?? []
+    return isLocalRelayHttpBase(effectiveRelayBase()) ? addrs : filterPublicDialMultiaddrs(addrs)
+  }
+
+  function relayBootstrapAddrs(): string[] {
+    const pick = status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
+    return pick == null ? [] : [pick]
+  }
+
   /** Multiaddr used by "Dial relay" / auto-dial: TLS+WS preferred, else first public `/ws`. */
   const pickedRelayDialMa = $derived.by((): string | null => {
     if (!status) return null
-    return pickBrowserDialMultiaddr(relayPublicMultiaddrs())
+    return pickBrowserDialMultiaddr(relayDialMultiaddrs())
   })
 
   async function applyTopicAndReconnect(): Promise<void> {
     busy = true
     try {
       persistTopic()
-      const pick = status ? pickBrowserDialMultiaddr(relayPublicMultiaddrs()) : null
+      const pick = status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
       if (node) {
         await node.stop()
         node = null
         relayReservationBanner = null
+        lastInboundPubsubDiscoveryFrom = ''
       }
       const n = createBrowserNode()
       await n.start()
@@ -195,9 +257,9 @@
   }
 
   async function dialRelayOnly(): Promise<void> {
-    const pick = status ? pickBrowserDialMultiaddr(relayPublicMultiaddrs()) : null
+    const pick = status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
     if (!pick) {
-      autoEchoResult = 'no WebSocket multiaddr in public /status'
+      autoEchoResult = 'no browser-dialable /ws multiaddr in relay status'
       return
     }
     busy = true
@@ -348,13 +410,13 @@
       }
       try {
         const n = await ensureNode()
-        const pick = status ? pickBrowserDialMultiaddr(relayPublicMultiaddrs()) : null
+        const pick = status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
         if (pick) {
           await n.dialRelay(pick)
           const { reply, ms } = await n.runEcho(pick, 'pwa-auto')
           autoEchoResult = `${reply} (${ms}ms)`
         } else {
-          autoEchoResult = 'no browser-dialable /ws in public /status'
+          autoEchoResult = 'no browser-dialable /ws multiaddr in relay status'
         }
       } catch (e) {
         autoEchoResult = `auto-echo: ${e instanceof Error ? e.message : String(e)}`
@@ -494,7 +556,7 @@
 <section class="panel">
   <h2>Browser libp2p node</h2>
   <div class="row">
-    <span class="pill">connected peers: <strong>{peersCount}</strong></span>
+    <span class="pill">connected peers: <strong data-testid="peer-count">{peersCount}</strong></span>
     <button
       type="button"
       disabled={busy}
@@ -568,7 +630,61 @@
 </section>
 
 <section class="panel">
-  <h2>PubSub peer discovery</h2>
+  <div class="panel-title-row">
+    <h2>PubSub peer discovery</h2>
+    <div
+      class="pubsub-discovery-leds"
+      aria-label="Pubsub peer discovery activity"
+      title="tx (orange): we published our discovery record. relay (cyan): inbound advert signed by this relay’s peer id from GET /status. peer (violet): inbound advert from any other libp2p peer (e.g. another tab). Save &amp; refresh status first so relay id is known."
+    >
+      <div
+        class="pubsub-led-slot"
+        title="We gossipsub-published our pubsub-peer-discovery payload on this topic."
+      >
+        <span
+          class="pubsub-led pubsub-led--orange"
+          class:pubsub-led--active={pubsubSelfPublishFlashUntilMs > discoveryNowMs}
+          aria-hidden="true"
+        ></span>
+        <span class="pubsub-led-label">tx</span>
+      </div>
+      <div
+        class="pubsub-led-slot"
+        title="Inbound discovery message signed by the relay (matches peer id from GET /status)."
+      >
+        <span
+          class="pubsub-led pubsub-led--cyan"
+          class:pubsub-led--active={pubsubRelayRecvFlashUntilMs > discoveryNowMs}
+          aria-hidden="true"
+        ></span>
+        <span class="pubsub-led-label">relay</span>
+      </div>
+      <div
+        class="pubsub-led-slot"
+        title="Inbound discovery message from another libp2p peer (not the relay id from /status)."
+      >
+        <span
+          class="pubsub-led pubsub-led--violet"
+          class:pubsub-led--active={pubsubRemoteRecvFlashUntilMs > discoveryNowMs}
+          aria-hidden="true"
+        ></span>
+        <span class="pubsub-led-label">peer</span>
+      </div>
+    </div>
+  </div>
+  <p class="sub" style="margin:0 0 0.65rem;font-size:0.76rem">
+    Last inbound discovery signer:
+    {#if lastInboundPubsubDiscoveryFrom}
+      <code class="ma">{lastInboundPubsubDiscoveryFrom}</code>
+      {#if relayPeerIdForPubsubLeds !== '' && lastInboundPubsubDiscoveryFrom === relayPeerIdForPubsubLeds}
+        <span class="muted">= relay</span>
+      {:else if relayPeerIdForPubsubLeds !== ''}
+        <span class="muted">= peer</span>
+      {/if}
+    {:else}
+      <span class="muted">none yet</span>
+    {/if}
+  </p>
   <div class="row">
     <label for="pubsubTopic">Discovery topic</label>
     <input
@@ -592,34 +708,33 @@
   {#if topicDrift}
     <p class="badge warn">Local topic differs from relay — discovery may not match.</p>
   {/if}
-  <p class="sub" style="margin:0.75rem 0 0.75rem">
-    Peers from gossipsub on your discovery topic. Auto WebRTC dial runs only when their advertised multiaddrs include a
-    <strong>public</strong> WebRTC-Direct address (not <code>127.0.0.1</code> / RFC1918). Relay <code>GET /status</code> and
-    gossipsub use the same announced listen set — WebRTC often stays on loopback until you add a public variant via
-    <code>RELAY_APPEND_ANNOUNCE</code>.
-  </p>
   <table>
     <thead>
       <tr>
         <th>Peer</th>
-        <th>Public WebRTC?</th>
+        <th>Dial path OK?</th>
         <th>Auto-dial</th>
         <th>Detail</th>
       </tr>
     </thead>
     <tbody>
       {#each discoveryRows as d (d.peerId)}
-        <tr>
+        <tr data-testid="peer-card" data-peer-id={d.peerId}>
           <td class="ma">
             <span class="peer-discovery-led-wrap" title={peerDiscoveryLedTooltip(d.discoveryAddrs)}>
               {#if d.discoveryFlashUntilMs > discoveryNowMs}
                 <span class="peer-discovery-led-flash" aria-hidden="true"></span>
               {/if}
-              <span>{d.peerId}</span>
+              <span>
+                {#if isRelayDiscoveryPeer(d.peerId)}
+                  <span class="badge">relay</span>{' '}
+                {/if}
+                {d.peerId}
+              </span>
             </span>
           </td>
-          <td>{d.webrtcCapable ? 'yes' : 'no'}</td>
-          <td><span class="badge" class:ok={d.autoDial === 'ok'} class:bad={d.autoDial === 'error'}>{d.autoDial}</span></td>
+          <td>{d.autoDialEligible ? 'yes' : 'no'}</td>
+          <td><span data-testid="peer-card-status" class="badge" class:ok={d.autoDial === 'ok'} class:bad={d.autoDial === 'error'}>{d.autoDial}</span></td>
           <td class="ma">{d.detail ?? ''}</td>
         </tr>
       {:else}

@@ -27,6 +27,15 @@ export default defineConfig({
   define: {
     global: 'globalThis',
   },
+  server: {
+    proxy: {
+      '/__relay': {
+        target: process.env.E2E_RELAY_PROXY_TARGET || 'http://127.0.0.1:4300',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/__relay/, ''),
+      },
+    },
+  },
   optimizeDeps: {
     include: [
       'libp2p',
