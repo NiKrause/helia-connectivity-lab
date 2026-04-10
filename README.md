@@ -57,6 +57,7 @@ Endpoints:
 | Variable | Meaning |
 |----------|---------|
 | **`RELAY_PUBSUB_DISCOVERY_TOPIC`** | Initial pubsub peer-discovery topic (default **`_peer-discovery._p2p._pubsub`**). Overridden by **`POST /run/pubsub-discovery`** while the process runs. |
+| **`RELAY_MAX_RESERVATIONS`** | Max simultaneous **circuit relay v2** reservations the server accepts (default **1500**, ~100× the old **15**). When full, new reserves return **`RESERVATION_REFUSED`**. Capped at **100000** if you set this env. |
 
 The relay also runs **gossipsub**, **`@libp2p/pubsub-peer-discovery`**, and **`@libp2p/dcutr`** alongside **circuit relay v2**.
 
@@ -234,7 +235,7 @@ RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_QUIC_PORT=5000 RELAY_WEBRTC_PORT=90
 | `RELAY_AUTO_TLS_DATASTORE_PATH` | `./libp2p-autotls-data` | Writable directory for LevelDB (certs). Use e.g. **`/var/lib/helia-connectivity-lab/libp2p-datastore`** on a VPS. |
 | `RELAY_AUTO_TLS_STAGING` | unset | Set to **`1`** for Let’s Encrypt **staging** ACME. |
 | `RELAY_APPEND_ANNOUNCE` | unset | Comma-separated multiaddrs **without spaces** to **append** as announced addresses (e.g. public **`/ip4/x/tcp/81`** and **`/ip4/x/tcp/8443/ws`** when the process listens on loopback behind port forwarding). Helps **`GET /status`** and **AutoTLS** see a publicly dialable WS address. **WebRTC-Direct:** the relay often lists WebRTC only on **`/ip4/127.0.0.1/udp/…/webrtc-direct/certhash/…`**; browsers cannot dial that. Copy that line, replace **`127.0.0.1`** with your VPS public IPv4 (keep **`certhash`** and **`/p2p/…`** unchanged), and add it here so **gossipsub peer discovery** and **`GET /status`** expose a public WebRTC multiaddr. |
-| `RELAY_DEBUG` | unset | Appended to **`DEBUG`** before startup. Examples: **`libp2p:circuit-relay*`** (circuit relay v2 server/transport/reservation logs), **`libp2p:auto-tls`** (AutoTLS). Combine with commas. The bundled **`deploy/helia-connectivity-lab.service`** sets **`libp2p:circuit-relay*`** by default. Reservation **accept/refuse** also emits **`[relay-reservation]`** lines to stdout regardless of **`DEBUG`**. |
+| `RELAY_DEBUG` | unset | Appended to **`DEBUG`** before startup. Examples: **`libp2p:circuit-relay*`**, **`libp2p:gossipsub*`** (logs as `libp2p:gossipsub`), **`libp2p:auto-tls`**. Combine with commas (sample unit includes circuit-relay + gossipsub + `gossipsub:*`). Reservation **`[relay-reservation]`** lines are independent of **`DEBUG`**. |
 
 On start, the server prints **PeerId** and **dialable multiaddrs**. Pick the line that matches the transport you want to test (TCP, `/ws`, **`/tls/ws`** if AutoTLS has run, or `/webrtc-direct/.../certhash/...`).
 

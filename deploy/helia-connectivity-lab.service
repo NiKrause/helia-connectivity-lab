@@ -28,10 +28,9 @@ Environment=RELAY_CONTROL_HTTP_PORT=8008
 # Environment=RELAY_IPFS_TLS_KEY=/path/to/privkey.pem
 # Token: set RELAY_CONTROL_TOKEN only in /etc/default/helia-connectivity-lab — systemd applies EnvironmentFile after Environment= and overrides the same key.
 EnvironmentFile=-/etc/default/helia-connectivity-lab
-# libp2p debug: circuit relay (server + transport + reservation-store) — wildcards supported by the debug package
-Environment=RELAY_DEBUG=libp2p:circuit-relay*
-# Optional: add AutoTLS trace (hyphenated namespace): append to RELAY_DEBUG in /etc/default, e.g.
-#   RELAY_DEBUG=libp2p:circuit-relay*,libp2p:auto-tls
+# libp2p debug — wildcards supported by the `debug` package (see src/bootstrap-debug.ts)
+Environment=RELAY_DEBUG=libp2p:circuit-relay*,libp2p:gossipsub*,gossipsub:*
+# Optional: append in /etc/default, e.g.  ,libp2p:auto-tls
 ExecStart=/usr/bin/node dist/server.js
 Restart=on-failure
 RestartSec=5

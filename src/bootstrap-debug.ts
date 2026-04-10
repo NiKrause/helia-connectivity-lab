@@ -2,8 +2,9 @@
  * Import this file first from `server.ts` so the `debug` package sees namespaces
  * before libp2p / AutoTLS load.
  *
- * Use **`RELAY_DEBUG=libp2p:circuit-relay*`** (circuit relay logs) or **`RELAY_DEBUG=libp2p:auto-tls`**
- * (AutoTLS), or combine: **`RELAY_DEBUG=libp2p:circuit-relay*,libp2p:auto-tls`**
+ * Use **`RELAY_DEBUG=libp2p:circuit-relay*`** (circuit relay), **`libp2p:gossipsub*`** (ChainSafe gossipsub;
+ * there is no `gossipsub:` prefix on log lines), or **`RELAY_DEBUG=libp2p:auto-tls`** (AutoTLS). Combine with commas,
+ * e.g. **`RELAY_DEBUG=libp2p:circuit-relay*,libp2p:gossipsub*,gossipsub:*`** (`gossipsub:*` is harmless if unused).
  *
  * The AutoTLS service logs under **`libp2p:auto-tls`** (hyphen). The name
  * `libp2p:autotls` will not match.

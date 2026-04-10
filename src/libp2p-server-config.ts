@@ -41,6 +41,19 @@ export function resolvePubsubDiscoveryTopic(overrides?: RelayListenOverrides): s
   return DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC
 }
 
+/** Previous default in code was 15; raised ~100× so more browsers can hold reservations before RESERVATION_REFUSED. */
+const DEFAULT_RELAY_MAX_RESERVATIONS = 1500
+const RELAY_MAX_RESERVATIONS_CAP = 100_000
+
+export function resolveRelayMaxReservations(): number {
+  const raw = process.env.RELAY_MAX_RESERVATIONS?.trim()
+  if (raw) {
+    const n = parseInt(raw, 10)
+    if (Number.isFinite(n) && n >= 1) return Math.min(n, RELAY_MAX_RESERVATIONS_CAP)
+  }
+  return DEFAULT_RELAY_MAX_RESERVATIONS
+}
+
 /** When true, libp2p needs a persistent `datastore` (Level) + `keychain` + `autoTLS` services. */
 export function readRelayAutoTlsEnabled(): boolean {
   const v = (process.env.RELAY_AUTO_TLS || '').toLowerCase()
@@ -139,12 +152,17 @@ export function createServerLibp2pOptions(
     services: {
       identify: identify(),
       identifyPush: identifyPush(),
-      pubsub: gossipsub({ allowPublishToZeroTopicPeers: true }),
+      pubsub: gossipsub({
+        allowPublishToZeroTopicPeers: true,
+        /** Hub topology: help mesh graft / peer exchange between browsers that only dial this relay. */
+        doPX: true,
+        runOnLimitedConnection: true,
+      }),
       dcutr: dcutr(),
       relay: circuitRelayServer({
         hopTimeout: 30_000,
         reservations: {
-          maxReservations: 15,
+          maxReservations: resolveRelayMaxReservations(),
           reservationTtl: 60 * 60 * 1000,
           defaultDataLimit: BigInt(1 << 20),
           defaultDurationLimit: 120_000,
