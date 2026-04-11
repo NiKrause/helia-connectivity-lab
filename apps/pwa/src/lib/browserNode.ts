@@ -654,6 +654,14 @@ export class ConnectivityBrowserNode {
     return this.libp2p?.peerId.toString() ?? null
   }
 
+  isStarted(): boolean {
+    return this.libp2p != null
+  }
+
+  getHelia(): HeliaLibp2p<Libp2p> | null {
+    return this.helia
+  }
+
   getTopicSubscribers(): string[] {
     const node = this.libp2p
     if (node == null) return []

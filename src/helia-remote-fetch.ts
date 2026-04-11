@@ -18,7 +18,7 @@ function usage(): never {
   node dist/helia-remote-fetch.js <multiaddr-with-/p2p/> <cid>
 
 Example:
-  node dist/helia-remote-fetch.js '/ip4/95.217.163.72/tcp/81/p2p/12D3KooW...' bafkrei...
+  node dist/helia-remote-fetch.js '/ip4/95.217.163.72/tcp/8443/p2p/12D3KooW...' bafkrei...
 `)
   process.exit(1)
 }

@@ -7,6 +7,46 @@ export type RelayStatus = {
   listenOverrides?: Record<string, unknown>
 }
 
+export type RelayPinningStats = {
+  totalPinned: number
+  syncOperations: number
+  failedSyncs: number
+  pinnedMediaCids: string[]
+  timestamp: string
+}
+
+export type RelayPinnedDatabase = {
+  address: string
+  lastSyncedAt: string
+}
+
+export type RelayPinningSync = {
+  ok: true
+  dbAddress: string
+  receivedUpdate: boolean
+  fallbackScanUsed: boolean
+  extractedMediaCids: string[]
+  coalesced?: boolean
+}
+
+export type RelayRestartRun = {
+  ok: true
+  accepted: true
+  restart: 'pending'
+  peerId: string
+  listenOverrides: Record<string, unknown>
+  multiaddrsBeforeRestart: string[]
+  hint: string
+}
+
+async function parseJsonOrThrow<T>(response: Response): Promise<T> {
+  try {
+    return (await response.json()) as T
+  } catch {
+    throw new Error(`HTTP ${response.status} (non-JSON body)`)
+  }
+}
+
 export function relayBase(): string {
   const b = import.meta.env.VITE_RELAY_HTTP_BASE?.trim() || 'http://libp2p.le-space.de:88'
   return b.replace(/\/$/, '')
@@ -149,6 +189,112 @@ export async function fetchStatus(
     } catch {
       return { ok: false, error: statusError }
     }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+export async function fetchPinningStats(
+  base: string,
+  bearerToken?: string | null
+): Promise<{ ok: true; data: RelayPinningStats } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(`${base}/pinning/stats`, {
+      headers: relayAuthHeaders(bearerToken),
+    })
+    const data = await parseJsonOrThrow<RelayPinningStats & { error?: string }>(response)
+    if (!response.ok) {
+      return { ok: false, error: data.error ? String(data.error) : `HTTP ${response.status}` }
+    }
+    return { ok: true, data }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+export async function fetchPinnedDatabase(
+  base: string,
+  dbAddress: string,
+  bearerToken?: string | null
+): Promise<
+  | { ok: true; data: RelayPinnedDatabase | null }
+  | { ok: false; error: string; notFound?: boolean }
+> {
+  try {
+    const url = new URL(`${base}/pinning/databases`)
+    url.searchParams.set('address', dbAddress)
+    const response = await fetch(url.toString(), {
+      headers: relayAuthHeaders(bearerToken),
+    })
+    const data = await parseJsonOrThrow<{ databases?: RelayPinnedDatabase[]; error?: string }>(response)
+    if (response.status === 404) {
+      return { ok: false, error: data.error ? String(data.error) : 'Database address not found in relay sync history', notFound: true }
+    }
+    if (!response.ok) {
+      return { ok: false, error: data.error ? String(data.error) : `HTTP ${response.status}` }
+    }
+    return { ok: true, data: Array.isArray(data.databases) ? (data.databases[0] ?? null) : null }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+export async function triggerPinningSync(
+  base: string,
+  dbAddress: string,
+  bearerToken?: string | null
+): Promise<{ ok: true; data: RelayPinningSync } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(`${base}/pinning/sync`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...relayAuthHeaders(bearerToken),
+      },
+      body: JSON.stringify({ dbAddress }),
+    })
+    const data = await parseJsonOrThrow<{
+      ok?: boolean
+      error?: string
+      dbAddress: string
+      receivedUpdate?: boolean
+      fallbackScanUsed?: boolean
+      extractedMediaCids?: string[]
+      coalesced?: boolean
+    }>(response)
+    if (!response.ok || data.ok === false) {
+      return { ok: false, error: data.error ? String(data.error) : `HTTP ${response.status}` }
+    }
+    return {
+      ok: true,
+      data: {
+        ok: true,
+        dbAddress: data.dbAddress,
+        receivedUpdate: Boolean(data.receivedUpdate),
+        fallbackScanUsed: Boolean(data.fallbackScanUsed),
+        extractedMediaCids: Array.isArray(data.extractedMediaCids) ? data.extractedMediaCids : [],
+        ...(data.coalesced ? { coalesced: true } : {}),
+      },
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+export async function restartRelayRuntime(
+  base: string,
+  bearerToken?: string | null
+): Promise<{ ok: true; data: RelayRestartRun } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(`${base}/run/restart`, {
+      method: 'POST',
+      headers: relayAuthHeaders(bearerToken),
+    })
+    const data = await parseJsonOrThrow<RelayRestartRun & { ok?: boolean; error?: string }>(response)
+    if (!response.ok) {
+      return { ok: false, error: data.error ? String(data.error) : `HTTP ${response.status}` }
+    }
+    return { ok: true, data }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }

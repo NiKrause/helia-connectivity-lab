@@ -23,7 +23,7 @@ function usage(): never {
   node dist/helia-laptop-provide.js <relay-multiaddr-with-/p2p/> <file-path>
 
 Example:
-  node dist/helia-laptop-provide.js '/ip4/95.217.163.72/tcp/81/p2p/12D3KooW...' ./notes.txt
+  node dist/helia-laptop-provide.js '/ip4/95.217.163.72/tcp/8443/p2p/12D3KooW...' ./notes.txt
 `)
   process.exit(1)
 }

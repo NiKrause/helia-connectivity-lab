@@ -4,11 +4,16 @@
     relayBase as defaultRelayBase,
     relayAuthHeaders,
     fetchHealth,
+    fetchPinnedDatabase,
+    fetchPinningStats,
     fetchStatus,
     isLocalRelayHttpBase,
     pickBrowserDialMultiaddr,
+    restartRelayRuntime,
+    triggerPinningSync,
     transportLabel,
     canBrowserDialMultiaddr,
+    type RelayPinningStats,
     type RelayStatus,
   } from './lib/relayApi'
   import { DEFAULT_PUBSUB_PEER_DISCOVERY_TOPIC } from './lib/protocol'
@@ -19,6 +24,11 @@
     type RelayReservationUiEvent,
   } from './lib/browserNode'
   import { filterPublicDialMultiaddrs, isPublicDialMultiaddr } from './lib/publicMultiaddrFilter'
+  import {
+    BrowserTodoOrbitDb,
+    DEFAULT_TODO_DB_NAME,
+    type TodoDoc,
+  } from './lib/todoOrbitdb'
 
   let httpBase = $state('')
   /** Same value as server RELAY_CONTROL_TOKEN when /status is behind auth (legacy relay or reverse proxy). */
@@ -64,6 +74,17 @@
   let heliaCid = $state('')
   let gatewayCid = $state('')
   let gatewayResult = $state('')
+  let todoDbName = $state(DEFAULT_TODO_DB_NAME)
+  let todoDbAddress = $state('')
+  let todoItems = $state<TodoDoc[]>([])
+  let todoText = $state('')
+  let todoMediaCid = $state('')
+  let todoMediaIds = $state('')
+  let todoInfo = $state('')
+  let relayPinningInfo = $state('')
+  let relayPinningStats = $state<RelayPinningStats | null>(null)
+  let relayRestartResult = $state('')
+  const todoDb = new BrowserTodoOrbitDb()
 
   function loadStorage(): void {
     const b = localStorage.getItem('relayHttpBase')
@@ -111,6 +132,19 @@
 
   function persistCustom(): void {
     localStorage.setItem('customMultiaddrs', JSON.stringify(customRows))
+  }
+
+  async function resetTodoState(message = ''): Promise<void> {
+    await todoDb.close()
+    todoDbAddress = ''
+    todoItems = []
+    todoInfo = message
+    relayPinningInfo = ''
+    relayPinningStats = null
+  }
+
+  function currentRelayBase(): string {
+    return (httpBase.trim() || defaultRelayBase()).replace(/\/$/, '')
   }
 
   /** Tooltip for the peer cell: last `peer:discovery` payload. */
@@ -228,36 +262,88 @@
     return pick == null ? [] : [pick]
   }
 
+  function selectedRelayDialMultiaddr(): string | null {
+    return status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
+  }
+
   /** Multiaddr used by "Dial relay" / auto-dial: TLS+WS preferred, else first public `/ws`. */
   const pickedRelayDialMa = $derived.by((): string | null => {
-    if (!status) return null
-    return pickBrowserDialMultiaddr(relayDialMultiaddrs())
+    return selectedRelayDialMultiaddr()
   })
 
-  async function applyTopicAndReconnect(): Promise<void> {
+  async function connectNodeToRelay(n: ConnectivityBrowserNode): Promise<string> {
+    const pick = selectedRelayDialMultiaddr()
+    if (!pick) {
+      return 'node started (no browser-dialable /ws multiaddr in relay status)'
+    }
+    await n.dialRelay(pick)
+    return `connected to relay via ${transportLabel(pick)}`
+  }
+
+  async function startBrowserNode(): Promise<void> {
     busy = true
     try {
-      persistTopic()
-      const pick = status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
-      if (node) {
-        await node.stop()
-        node = null
-        relayReservationBanner = null
-        lastInboundPubsubDiscoveryFrom = ''
-      }
-      const n = createBrowserNode()
-      await n.start()
-      node = n
-      if (pick) {
-        await n.dialRelay(pick)
-      }
+      const n = await ensureNode()
+      autoEchoResult = await connectNodeToRelay(n)
+    } catch (e) {
+      autoEchoResult = e instanceof Error ? e.message : String(e)
     } finally {
       busy = false
     }
   }
 
+  async function stopBrowserNode(message = 'browser node stopped'): Promise<void> {
+    busy = true
+    try {
+      await resetTodoState('browser node stopped — the in-memory todo db was discarded')
+      if (node) {
+        await node.stop()
+        node = null
+      }
+      relayReservationBanner = null
+      lastInboundPubsubDiscoveryFrom = ''
+      pubsubSelfPublishFlashUntilMs = 0
+      pubsubRelayRecvFlashUntilMs = 0
+      pubsubRemoteRecvFlashUntilMs = 0
+      peersCount = 0
+      ownMultiaddrs = []
+      autoEchoResult = message
+    } finally {
+      busy = false
+    }
+  }
+
+  async function restartBrowserNode(message = 'browser node restarted'): Promise<void> {
+    busy = true
+    try {
+      await resetTodoState('browser node restarted — reopen the in-memory todo db to create a fresh address')
+      if (node) {
+        await node.stop()
+        node = null
+      }
+      relayReservationBanner = null
+      lastInboundPubsubDiscoveryFrom = ''
+      pubsubSelfPublishFlashUntilMs = 0
+      pubsubRelayRecvFlashUntilMs = 0
+      pubsubRemoteRecvFlashUntilMs = 0
+      const n = createBrowserNode()
+      await n.start()
+      node = n
+      autoEchoResult = await connectNodeToRelay(n)
+    } catch (e) {
+      autoEchoResult = `${message}: ${e instanceof Error ? e.message : String(e)}`
+    } finally {
+      busy = false
+    }
+  }
+
+  async function applyTopicAndReconnect(): Promise<void> {
+    persistTopic()
+    await restartBrowserNode('browser node recreated with new pubsub topic')
+  }
+
   async function dialRelayOnly(): Promise<void> {
-    const pick = status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
+    const pick = selectedRelayDialMultiaddr()
     if (!pick) {
       autoEchoResult = 'no browser-dialable /ws multiaddr in relay status'
       return
@@ -355,7 +441,7 @@
   }
 
   async function fetchGateway(): Promise<void> {
-    const base = (httpBase.trim() || defaultRelayBase()).replace(/\/$/, '')
+    const base = currentRelayBase()
     const c = gatewayCid.trim()
     if (!c) {
       gatewayResult = 'enter CID'
@@ -370,6 +456,173 @@
       gatewayResult = `HTTP ${r.status} ${r.ok ? 'ok' : ''} ${buf.byteLength} bytes (gateway may 404 if relay does not have block)`
     } catch (e) {
       gatewayResult = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  function parseMediaIds(raw: string): string[] {
+    return raw
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  }
+
+  async function ensureTodoDbOpen(): Promise<void> {
+    if (todoDb.isOpen() && todoDb.getName() === (todoDbName.trim() || DEFAULT_TODO_DB_NAME)) {
+      return
+    }
+    const n = await ensureNode()
+    if (n.peerCount() === 0 && selectedRelayDialMultiaddr()) {
+      try {
+        autoEchoResult = await connectNodeToRelay(n)
+      } catch {
+        // keep local DB creation working even if relay dial fails
+      }
+    }
+    const helia = n.getHelia()
+    if (helia == null) throw new Error('helia not started')
+    const opened = await todoDb.open(helia, todoDbName)
+    todoDbAddress = opened.address
+    todoItems = opened.docs
+  }
+
+  async function openTodoDb(): Promise<void> {
+    busy = true
+    try {
+      await ensureTodoDbOpen()
+      todoInfo = `opened in-memory documents db "${todoDb.getName()}"`
+    } catch (e) {
+      todoInfo = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  async function addTodo(): Promise<void> {
+    const text = todoText.trim()
+    if (!text) {
+      todoInfo = 'enter todo text first'
+      return
+    }
+    busy = true
+    try {
+      await ensureTodoDbOpen()
+      const now = new Date().toISOString()
+      const mediaIds = parseMediaIds(todoMediaIds)
+      todoItems = await todoDb.put({
+        id: crypto.randomUUID(),
+        text,
+        done: false,
+        createdAt: now,
+        updatedAt: now,
+        ...(todoMediaCid.trim() ? { mediaCid: todoMediaCid.trim() } : {}),
+        ...(mediaIds.length > 0 ? { mediaIds } : {}),
+      })
+      todoDbAddress = todoDb.getAddress() ?? ''
+      todoText = ''
+      todoMediaCid = ''
+      todoMediaIds = ''
+      todoInfo = `saved todo in ${todoDbAddress}`
+    } catch (e) {
+      todoInfo = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  async function toggleTodo(item: TodoDoc): Promise<void> {
+    busy = true
+    try {
+      await ensureTodoDbOpen()
+      todoItems = await todoDb.put({
+        ...item,
+        done: !item.done,
+        updatedAt: new Date().toISOString(),
+      })
+      todoInfo = `updated todo ${item.id}`
+    } catch (e) {
+      todoInfo = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  async function removeTodo(id: string): Promise<void> {
+    busy = true
+    try {
+      await ensureTodoDbOpen()
+      todoItems = await todoDb.remove(id)
+      todoInfo = `removed todo ${id}`
+    } catch (e) {
+      todoInfo = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  function useLastHeliaCid(): void {
+    if (!heliaCid.trim()) {
+      todoInfo = 'add a file to Helia first so there is a CID to copy'
+      return
+    }
+    todoMediaCid = heliaCid.trim()
+  }
+
+  async function checkRelayReplication(): Promise<void> {
+    const dbAddress = todoDbAddress.trim()
+    if (!dbAddress) {
+      relayPinningInfo = 'open the todo db first so there is an address to check'
+      return
+    }
+    const result = await fetchPinnedDatabase(currentRelayBase(), dbAddress, currentAuthToken())
+    if (result.ok) {
+      if (result.data == null) {
+        relayPinningInfo = 'relay returned no matching database entry'
+      } else {
+        relayPinningInfo = `relay knows ${result.data.address} (lastSyncedAt ${result.data.lastSyncedAt})`
+      }
+    } else {
+      relayPinningInfo = result.notFound ? 'not replicated on relay yet' : result.error
+    }
+    const stats = await fetchPinningStats(currentRelayBase(), currentAuthToken())
+    relayPinningStats = stats.ok ? stats.data : null
+  }
+
+  async function syncRelayReplication(): Promise<void> {
+    const dbAddress = todoDbAddress.trim()
+    if (!dbAddress) {
+      relayPinningInfo = 'open the todo db first so there is an address to sync'
+      return
+    }
+    const result = await triggerPinningSync(currentRelayBase(), dbAddress, currentAuthToken())
+    if (result.ok) {
+      const sync = result.data
+      let message =
+        `sync ok: receivedUpdate=${sync.receivedUpdate} fallbackScanUsed=${sync.fallbackScanUsed} extractedMediaCids=` +
+        `${sync.extractedMediaCids.length > 0 ? sync.extractedMediaCids.join(', ') : '(none)'}`
+      const check = await fetchPinnedDatabase(currentRelayBase(), dbAddress, currentAuthToken())
+      if (check.ok && check.data != null) {
+        message += `; relay lastSyncedAt=${check.data.lastSyncedAt}`
+      } else if (!check.ok && !check.notFound) {
+        message += `; check failed: ${check.error}`
+      }
+      relayPinningInfo = message
+      const stats = await fetchPinningStats(currentRelayBase(), currentAuthToken())
+      relayPinningStats = stats.ok ? stats.data : null
+    } else {
+      relayPinningInfo = result.error
+    }
+  }
+
+  async function restartRelay(): Promise<void> {
+    busy = true
+    try {
+      const result = await restartRelayRuntime(currentRelayBase(), currentAuthToken())
+      relayRestartResult = result.ok
+        ? `relay restart accepted for peer ${result.data.peerId}`
+        : result.error
+      await refreshHttp()
+    } finally {
+      busy = false
     }
   }
 
@@ -410,13 +663,13 @@
       }
       try {
         const n = await ensureNode()
-        const pick = status ? pickBrowserDialMultiaddr(relayDialMultiaddrs()) : null
-        if (pick) {
+        const pick = selectedRelayDialMultiaddr()
+        if (pick != null) {
           await n.dialRelay(pick)
           const { reply, ms } = await n.runEcho(pick, 'pwa-auto')
           autoEchoResult = `${reply} (${ms}ms)`
         } else {
-          autoEchoResult = 'no browser-dialable /ws multiaddr in relay status'
+          autoEchoResult = 'node started (no browser-dialable /ws multiaddr in relay status)'
         }
       } catch (e) {
         autoEchoResult = `auto-echo: ${e instanceof Error ? e.message : String(e)}`
@@ -429,7 +682,13 @@
         ownMultiaddrs = node.getOwnMultiaddrs()
       }
     }, 800)
-    return () => clearInterval(iv)
+    return () => {
+      clearInterval(iv)
+      void todoDb.close()
+      if (node) {
+        void node.stop()
+      }
+    }
   })
 </script>
 
@@ -468,6 +727,12 @@
     <span class="pill">health: {#if healthOk}<span class="badge ok">ok</span>{:else}<span class="badge bad">down</span>{/if}</span>
     {#if healthMsg}<span class="muted">{healthMsg}</span>{/if}
     {#if statusErr}<span class="badge bad">{statusErr}</span>{/if}
+  </div>
+  <div class="row">
+    <button type="button" disabled={busy} onclick={() => void restartRelay()}>POST /run/restart</button>
+    {#if relayRestartResult}
+      <span class="ma">{relayRestartResult}</span>
+    {/if}
   </div>
   {#if status}
     <div class="row">
@@ -520,7 +785,7 @@
     <button type="button" disabled={busy} onclick={stopBulk}>Abort bulk</button>
   </div>
   {#if bulkResult}
-    <p class="ma">{bulkResult}</p>
+    <p class="ma" data-testid="bulk-result">{bulkResult}</p>
   {/if}
   <table>
     <thead>
@@ -557,6 +822,9 @@
   <h2>Browser libp2p node</h2>
   <div class="row">
     <span class="pill">connected peers: <strong data-testid="peer-count">{peersCount}</strong></span>
+    <button type="button" disabled={busy || !!node} onclick={() => void startBrowserNode()}>Start node</button>
+    <button type="button" disabled={busy || !node} onclick={() => void stopBrowserNode()}>Stop node</button>
+    <button type="button" disabled={busy || !node} onclick={() => void restartBrowserNode()}>Restart node</button>
     <button
       type="button"
       disabled={busy}
@@ -745,6 +1013,85 @@
 </section>
 
 <section class="panel">
+  <h2>OrbitDB Todo</h2>
+  <p class="sub">
+    Memory-only browser documents DB. Restarting or stopping the browser node clears this DB and creates a fresh address next time you open it.
+  </p>
+  <div class="row">
+    <label for="todoDbName">DB name</label>
+    <input id="todoDbName" type="text" bind:value={todoDbName} placeholder={DEFAULT_TODO_DB_NAME} />
+    <button type="button" disabled={busy} onclick={() => void openTodoDb()}>Open documents DB</button>
+  </div>
+  <div class="row">
+    <span>DB address</span>
+    <code class="ma" data-testid="todo-db-address">{todoDbAddress || '(open the DB to generate an address)'}</code>
+  </div>
+  <div class="row" style="align-items:flex-start">
+    <label for="todoText">Todo</label>
+    <textarea id="todoText" rows="3" bind:value={todoText} placeholder="write a todo that may reference a CID or mediaIds"></textarea>
+  </div>
+  <div class="row">
+    <input type="text" bind:value={todoMediaCid} placeholder="optional mediaCid" />
+    <button type="button" onclick={useLastHeliaCid}>Use last Helia CID</button>
+  </div>
+  <div class="row">
+    <input type="text" bind:value={todoMediaIds} placeholder="optional mediaIds, comma-separated" />
+    <button type="button" disabled={busy} onclick={() => void addTodo()}>Add todo</button>
+  </div>
+  {#if todoInfo}
+    <p class="ma" data-testid="todo-info">{todoInfo}</p>
+  {/if}
+  <table>
+    <thead>
+      <tr>
+        <th>Done</th>
+        <th>Text</th>
+        <th>Media</th>
+        <th>Updated</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {#each todoItems as item (item.id)}
+        <tr>
+          <td>{item.done ? 'yes' : 'no'}</td>
+          <td class="ma">{item.text}</td>
+          <td class="ma">
+            {#if item.mediaCid}
+              {item.mediaCid}
+            {:else if item.mediaIds && item.mediaIds.length > 0}
+              {item.mediaIds.join(', ')}
+            {:else}
+              none
+            {/if}
+          </td>
+          <td class="ma">{item.updatedAt}</td>
+          <td>
+            <button type="button" disabled={busy} onclick={() => void toggleTodo(item)}>{item.done ? 'Mark open' : 'Mark done'}</button>
+            <button type="button" disabled={busy} onclick={() => void removeTodo(item.id)}>Delete</button>
+          </td>
+        </tr>
+      {:else}
+        <tr><td colspan="5">No todo documents yet.</td></tr>
+      {/each}
+    </tbody>
+  </table>
+  <div class="row" style="margin-top:0.85rem">
+    <button type="button" disabled={busy} onclick={() => void checkRelayReplication()}>Check relay replication</button>
+    <button type="button" disabled={busy} onclick={() => void syncRelayReplication()}>Trigger relay sync</button>
+  </div>
+  {#if relayPinningInfo}
+    <p class="ma" data-testid="pinning-info">{relayPinningInfo}</p>
+  {/if}
+  {#if relayPinningStats}
+    <p class="sub" style="margin:0" data-testid="pinning-stats">
+      Relay pinning stats: totalPinned={relayPinningStats.totalPinned} syncOperations={relayPinningStats.syncOperations}
+      failedSyncs={relayPinningStats.failedSyncs}
+    </p>
+  {/if}
+</section>
+
+<section class="panel">
   <h2>Helia / IPFS</h2>
   <p class="sub">Add stores blocks in this browser only. Gateway fetch hits the relay HTTP <code>/ipfs/&lt;cid&gt;</code> (relay must have the data).</p>
   <div
@@ -764,15 +1111,21 @@
   >
     Drag &amp; drop a file or click to upload
   </div>
-  <input id="file" type="file" hidden onchange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void onHeliaFile(f) }} />
+  <input
+    id="file"
+    data-testid="helia-file-input"
+    type="file"
+    hidden
+    onchange={(e) => { const f = e.currentTarget.files?.[0]; if (f) void onHeliaFile(f) }}
+  />
   {#if heliaCid}
-    <p class="ma">CID: {heliaCid}</p>
+    <p class="ma" data-testid="helia-cid">CID: {heliaCid}</p>
   {/if}
   <div class="row">
     <input type="text" bind:value={gatewayCid} placeholder="bafy… or Qm…" />
     <button type="button" onclick={() => void fetchGateway()}>GET /ipfs on relay</button>
   </div>
   {#if gatewayResult}
-    <p class="ma">{gatewayResult}</p>
+    <p class="ma" data-testid="gateway-result">{gatewayResult}</p>
   {/if}
 </section>

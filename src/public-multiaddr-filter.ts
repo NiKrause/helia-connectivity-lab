@@ -40,3 +40,21 @@ export function isPublicStatusMultiaddr(maStr: string): boolean {
 export function filterMultiaddrsForPublicStatus(addrs: string[]): string[] {
   return addrs.filter(isPublicStatusMultiaddr)
 }
+
+function isLoopbackRequester(remoteAddress: string | undefined): boolean {
+  const value = remoteAddress?.trim() || ''
+  return (
+    value === '127.0.0.1' ||
+    value === '::1' ||
+    value === '::ffff:127.0.0.1' ||
+    value.startsWith('::ffff:127.')
+  )
+}
+
+/**
+ * Local callers need loopback/private relay addrs so the browser can dial the local dev relay.
+ * Remote callers still get the public-only projection.
+ */
+export function filterMultiaddrsForStatusRequest(addrs: string[], remoteAddress: string | undefined): string[] {
+  return isLoopbackRequester(remoteAddress) ? addrs : filterMultiaddrsForPublicStatus(addrs)
+}

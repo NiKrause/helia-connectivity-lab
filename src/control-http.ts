@@ -6,12 +6,14 @@ import {
   resolvePubsubDiscoveryTopic,
   type RelayListenOverrides,
 } from './libp2p-server-config.js'
-import { filterMultiaddrsForPublicStatus } from './public-multiaddr-filter.js'
+import { filterMultiaddrsForStatusRequest } from './public-multiaddr-filter.js'
 import {
   clientLabel,
   readIpfsGatewayFeatureConfig,
   tryServeIpfsCat,
 } from './ipfs-http-gateway.js'
+import { localHttpOrigins, primaryHttpOrigin } from './http-listen-urls.js'
+import { tryServePinningHttp } from './pinning-http.js'
 
 function readControlConfig() {
   const port = Number(process.env.RELAY_CONTROL_HTTP_PORT || process.env.CONTROL_HTTP_PORT || '')
@@ -59,6 +61,25 @@ function authorize(req: http.IncomingMessage, token: string): boolean {
   return false
 }
 
+function forwardedForAddress(req: http.IncomingMessage): string | undefined {
+  const forwardedFor = req.headers['x-forwarded-for']
+  const first =
+    typeof forwardedFor === 'string'
+      ? forwardedFor
+      : Array.isArray(forwardedFor)
+        ? forwardedFor[0]
+        : ''
+  const candidate = first
+    .split(',')
+    .map((part) => part.trim())
+    .find((part) => part !== '')
+  return candidate || undefined
+}
+
+function requesterAddress(req: http.IncomingMessage): string | undefined {
+  return forwardedForAddress(req) || req.socket.remoteAddress
+}
+
 const MAX_JSON_BODY_BYTES = 16_384
 
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
@@ -96,7 +117,7 @@ export type ControlHttpServer = {
 
 /**
  * HTTP control plane (e.g. Nym-friendly port like 8008) to restart libp2p listeners without changing PeerId.
- * POST /run/tcp/81 — rebind TCP (requires root or CAP_NET_BIND_SERVICE for ports &lt; 1024).
+ * POST /run/tcp/8443 — rebind TCP on a Nym-friendly public port.
  * POST /run/ws/8080 — rebind WebSocket listener port.
  * POST /run/quic/5000 — rebind QUIC (UDP) listener port.
  * POST /run/webrtc/3478 — rebind WebRTC-Direct (UDP) listener port (alias: POST /run/webrtc-direct/&lt;port&gt;).
@@ -142,6 +163,29 @@ export function startControlHttpServer(opts: {
     return result
   }
 
+  function scheduleRestart(
+    nextOverrides: RelayListenOverrides,
+    logStart: string,
+    logDone: string
+  ): void {
+    setImmediate(() => {
+      void runSerial(async () => {
+        try {
+          console.log(logStart)
+          const old = opts.getRuntime()
+          await old.stop()
+          opts.setOverrides(nextOverrides)
+          const created = await startRelayRuntime(opts.privateKey, nextOverrides)
+          opts.setRuntime(created)
+          console.log(logDone)
+          logRelayBanner(created.libp2p)
+        } catch (e) {
+          console.error('[control] libp2p restart failed:', e)
+        }
+      }).catch(() => {})
+    })
+  }
+
   const server = http.createServer(async (req, res) => {
     const pathname = (req.url ?? '/').split('?')[0] || '/'
 
@@ -173,6 +217,10 @@ export function startControlHttpServer(opts: {
       return
     }
 
+    if (await tryServePinningHttp(req, res, opts.getRuntime().pinning)) {
+      return
+    }
+
     if (req.method === 'GET' && pathname === '/status') {
       const rt = opts.getRuntime()
       const allAddrs = rt.libp2p.getMultiaddrs().map((ma) => ma.toString())
@@ -180,7 +228,7 @@ export function startControlHttpServer(opts: {
         ok: true,
         peerId: rt.libp2p.peerId.toString(),
         listenOverrides: opts.getOverrides(),
-        multiaddrs: filterMultiaddrsForPublicStatus(allAddrs),
+        multiaddrs: filterMultiaddrsForStatusRequest(allAddrs, requesterAddress(req)),
         pubsubDiscoveryTopic: resolvePubsubDiscoveryTopic(opts.getOverrides()),
       })
       return
@@ -194,6 +242,29 @@ export function startControlHttpServer(opts: {
     }
 
     if (req.method === 'POST') {
+      if (pathname === '/run/restart' || pathname === '/run/restart/') {
+        req.resume()
+        const rtBefore = opts.getRuntime()
+        const next = opts.getOverrides()
+        res.setHeader('Connection', 'close')
+        sendJson(res, 202, {
+          ok: true,
+          accepted: true,
+          restart: 'pending',
+          peerId: rtBefore.libp2p.peerId.toString(),
+          listenOverrides: next,
+          multiaddrsBeforeRestart: rtBefore.libp2p.getMultiaddrs().map((ma) => ma.toString()),
+          hint: 'Libp2p restart is scheduled right after this response. Poll GET /status in ~1s.',
+        })
+
+        scheduleRestart(
+          next,
+          '[control] restart starting: requested full runtime restart',
+          '[control] restarted libp2p runtime'
+        )
+        return
+      }
+
       if (pathname === '/run/pubsub-discovery' || pathname === '/run/pubsub-discovery/') {
         let body: unknown
         try {
@@ -226,22 +297,11 @@ export function startControlHttpServer(opts: {
           hint: 'Libp2p restart is scheduled right after this response. Poll GET /status in ~1s.',
         })
 
-        setImmediate(() => {
-          void runSerial(async () => {
-            try {
-              console.log(`[control] restart starting: pubsub-discovery topic -> ${topic.slice(0, 80)}`)
-              const old = opts.getRuntime()
-              await old.stop()
-              opts.setOverrides(next)
-              const created = await startRelayRuntime(opts.privateKey, next)
-              opts.setRuntime(created)
-              console.log('[control] restarted libp2p with new pubsub discovery topic')
-              logRelayBanner(created.libp2p)
-            } catch (e) {
-              console.error('[control] libp2p restart failed:', e)
-            }
-          }).catch(() => {})
-        })
+        scheduleRestart(
+          next,
+          `[control] restart starting: pubsub-discovery topic -> ${topic.slice(0, 80)}`,
+          '[control] restarted libp2p with new pubsub discovery topic'
+        )
         return
       }
 
@@ -273,26 +333,11 @@ export function startControlHttpServer(opts: {
         res.setHeader('Connection', 'close')
         sendJson(res, 202, body)
 
-        setImmediate(() => {
-          void runSerial(async () => {
-            try {
-              console.log(
-                `[control] restart starting: ${run.kind === 'webrtc' ? 'webrtc-direct' : run.kind} -> port ${run.port}`
-              )
-              const old = opts.getRuntime()
-              await old.stop()
-              opts.setOverrides(next)
-              const created = await startRelayRuntime(opts.privateKey, next)
-              opts.setRuntime(created)
-              console.log(
-                `[control] restarted libp2p ${run.kind === 'webrtc' ? 'webrtc-direct' : run.kind} listener on port ${run.port}`
-              )
-              logRelayBanner(created.libp2p)
-            } catch (e) {
-              console.error('[control] libp2p restart failed:', e)
-            }
-          }).catch(() => {})
-        })
+        scheduleRestart(
+          next,
+          `[control] restart starting: ${run.kind === 'webrtc' ? 'webrtc-direct' : run.kind} -> port ${run.port}`,
+          `[control] restarted libp2p ${run.kind === 'webrtc' ? 'webrtc-direct' : run.kind} listener on port ${run.port}`
+        )
         return
       }
     }
@@ -301,11 +346,25 @@ export function startControlHttpServer(opts: {
   })
 
   server.listen(cfg.port, cfg.host, () => {
-    console.log(`Control HTTP listening on http://${cfg.host}:${cfg.port}`)
+    const origin = primaryHttpOrigin(cfg.host, cfg.port, 'http')
+    const localOrigins = localHttpOrigins(cfg.host, cfg.port, 'http')
+    console.log(`Control HTTP listening on ${origin}`)
+    if (localOrigins.length > 0) {
+      console.log('  Health:')
+      for (const url of localOrigins) {
+        console.log(`   ${url}/health`)
+      }
+      console.log('  Status:')
+      for (const url of localOrigins) {
+        console.log(`   ${url}/status`)
+      }
+    }
     console.log(
       '  POST /run/tcp|ws|quic|webrtc|webrtc-direct/<port>  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)'
     )
+    console.log('  POST /run/restart  (Authorization: Bearer <RELAY_CONTROL_TOKEN>)')
     console.log('  GET /health  GET /status (public)')
+    console.log('  GET /pinning/stats  GET /pinning/databases  POST /pinning/sync')
     console.log('  POST /run/pubsub-discovery  JSON {"topic":"..."}  (auth)')
     if (ipfsFeature.enabled) {
       console.log('  GET /ipfs/<cid>  (no auth — Helia unixfs.cat / bitswap on same libp2p as relay)')

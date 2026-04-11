@@ -4,7 +4,7 @@ Phase 1: minimal **libp2p** connectivity check between a **relay + echo server**
 
 The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in-memory blockstore). Optionally expose **`GET /ipfs/<cid>`** over HTTP(S) so the VPS can **`unixfs.cat`** a CID from the network (e.g. a laptop that dialed in on TCP / WS / QUIC / WebRTC like the rest of the lab).
 
-**Browser PWA:** `apps/pwa` — Svelte + Vite + **`vite-plugin-pwa`**. Run **`npm run pwa:dev`** (after **`cd apps/pwa && npm install`**). Set **`VITE_RELAY_HTTP_BASE`** (see `apps/pwa/.env.example`). The app calls public **`GET /health`** / **`GET /status`**, dials the relay over **`/ws`**, runs echo + bulk, **gossipsub + pubsub peer discovery** (topic editable; default **`_peer-discovery._p2p._pubsub`**), **WebRTC-filtered auto `dial(peerId)`**, and Helia add + **`GET /ipfs/<cid>`** on the relay.
+**Browser PWA:** `apps/pwa` — Svelte + Vite + **`vite-plugin-pwa`**. Run **`npm run pwa:dev`** (after **`cd apps/pwa && npm install`**). Set **`VITE_RELAY_HTTP_BASE`** (see [apps/pwa/.env.example](apps/pwa/.env.example)). The app is already implemented; see [Browser PWA](#browser-pwa) for the verified feature set.
 
 ## TLS / AutoTLS vs cleartext WebSocket
 
@@ -33,7 +33,7 @@ Disable WebRTC-Direct on the server if you only want TCP/WS: `RELAY_DISABLE_WEBR
 
 ## Nym VPN and the control HTTP API
 
-[Nym exit policy](https://nymtech.net/.wellknown/network-requester/exit-policy.txt) only allows outbound TCP to certain **destination ports**. Your libp2p **TCP relay** must therefore listen on a port the mixnet can reach (e.g. **81**). The **control REST API** should listen on a port **you** can call through the mixnet (often **8008** or another allowed port—check the current policy).
+[Nym exit policy](https://nymtech.net/.wellknown/network-requester/exit-policy.txt) only allows outbound TCP to certain **destination ports**. Your libp2p **TCP relay** must therefore listen on a port the mixnet can reach (e.g. **8443** with the current published policy). The **control REST API** should listen on a port **you** can call through the mixnet (often **8008** or another allowed port—check the current policy).
 
 Enable a small **Node HTTP** control server (plain HTTP, separate from libp2p):
 
@@ -63,16 +63,16 @@ The relay also runs **gossipsub**, **`@libp2p/pubsub-peer-discovery`**, and **`@
 
 Each restart recreates the libp2p node; **WebRTC-Direct** listening addresses (including `certhash`) change even when **PeerId** is stable—re-copy those multiaddrs after a restart if you use WebRTC.
 
-**`curl: (52) Empty reply from server` on `POST /run/...`:** often means the TCP connection closed with **no** HTTP body—e.g. **HTTPS on that port** while you use `http://` (try `openssl s_client -connect host:88` to see TLS), a **reverse proxy** resetting idle connections, or the **Node process exiting** during restart (check `journalctl -u helia-connectivity-lab -e`). After deploying the current code, you should at least get a **`202` JSON** before any in-process restart runs.
+**`curl: (52) Empty reply from server` on `POST /run/...`:** often means the TCP connection closed with **no** HTTP body—e.g. **HTTPS on that port** while you use `http://` (try `openssl s_client -connect host:8008` to see TLS), a **reverse proxy** resetting idle connections, or the **Node process exiting** during restart (check `journalctl -u helia-connectivity-lab -e`). After deploying the current code, you should at least get a **`202` JSON** before any in-process restart runs.
 
 **`202` but `/status` never changes:** older builds waited for a response `finish` event before scheduling the restart; with some clients that event never fired, so nothing ran. Current code schedules restart on **`setImmediate`** and sends **`Connection: close`**. Wait a second, then **`GET /status`** again.
 
-**TCP ports &lt; 1024** (e.g. **81**, **82**): binding requires **root** or **`CAP_NET_BIND_SERVICE`** on the Node binary (systemd `AmbientCapabilities=`). If restart fails after that, check **`journalctl -u helia-connectivity-lab -e`** for `EACCES` / `permission denied`.
+**TCP ports &lt; 1024** still require **root** or **`CAP_NET_BIND_SERVICE`** on the Node binary (systemd `AmbientCapabilities=`). If restart fails after that, check **`journalctl -u helia-connectivity-lab -e`** for `EACCES` / `permission denied`. For current Nym-friendly deployments, prefer **8443** instead of older examples such as **81**.
 
-Example (control on 8008, then move libp2p TCP to 81 — **run Node as root** for ports &lt; 1024, or use `setcap cap_net_bind_service=+ep $(which node)`):
+Example (control on 8008, then move libp2p TCP to 8443):
 
 ```bash
-curl -sS -w '\nHTTP %{http_code}\n' -X POST "http://YOUR_HOST:8008/run/tcp/81" \
+curl -sS -w '\nHTTP %{http_code}\n' -X POST "http://YOUR_HOST:8008/run/tcp/8443" \
   -H "Authorization: Bearer $RELAY_CONTROL_TOKEN"
 # Expect HTTP 202, then:
 curl -sS "http://YOUR_HOST:8008/status"
@@ -108,14 +108,14 @@ Open your **control HTTP** port in the **firewall** if you need **`/ipfs`** from
 
 ### Laptop to VPS: Helia file over HTTP and bitswap
 
-**Idea:** the **laptop** runs Helia, **dials the relay** on libp2p (e.g. TCP **81**), **adds** a file, and stays running. The **VPS relay** serves **`GET /ipfs/<cid>`** on the **control HTTP port**; Helia on the VPS **bitswaps** blocks from the laptop over that libp2p connection. The machine that runs **`curl`** only needs HTTP access to the VPS; it does **not** need to be the laptop—but the **laptop provider must stay up** until the download finishes.
+**Idea:** the **laptop** runs Helia, **dials the relay** on libp2p (e.g. TCP **8443**), **adds** a file, and stays running. The **VPS relay** serves **`GET /ipfs/<cid>`** on the **control HTTP port**; Helia on the VPS **bitswaps** blocks from the laptop over that libp2p connection. The machine that runs **`curl`** only needs HTTP access to the VPS; it does **not** need to be the laptop—but the **laptop provider must stay up** until the download finishes.
 
 **VPS prerequisites (environment, e.g. `/etc/default/helia-connectivity-lab`):**
 
 - **`RELAY_CONTROL_HTTP_PORT`** and **`RELAY_CONTROL_TOKEN`** (control API on).
 - **`RELAY_IPFS_GATEWAY=1`** so **`/ipfs/<cid>`** is mounted on that same HTTP port.
 - Optional: **`RELAY_IPFS_GATEWAY_LOG=1`**, **`LIBP2P_CONN_LOG=1`** (see [Viewing logs on the VPS](#viewing-logs-on-the-vps)).
-- Firewall: **libp2p TCP** (e.g. **81**) from the internet so the laptop can dial; **control HTTP port** (e.g. **88**) if you **`curl`** from outside.
+- Firewall: **libp2p TCP** (e.g. **8443**) from the internet so the laptop can dial; **control HTTP port** (e.g. **8008**) if you **`curl`** from outside.
 
 **Steps (order matters):**
 
@@ -131,7 +131,7 @@ npm run helia:laptop-provide -- \
   /path/to/file.jpg
 ```
 
-Use the **relay’s public IPv4** and the **TCP port** the relay listens on (often **81**). **`PeerId`** must match the relay (from **`GET /status`** or server boot log). Wait for **`Dial OK`** and copy the printed **UnixFS CID**. **Do not press Ctrl+C** until the download is done.
+Use the **relay’s public IPv4** and the **TCP port** the relay listens on (often **8443** for Nym-friendly setups). **`PeerId`** must match the relay (from **`GET /status`** or server boot log). Wait for **`Dial OK`** and copy the printed **UnixFS CID**. **Do not press Ctrl+C** until the download is done.
 
 3. **Fetch over HTTP** (third terminal or any host that reaches the VPS control port). Prefer **no HTTP proxy** so debugging matches the server logs:
 
@@ -141,8 +141,8 @@ curl --noproxy '*' -v --progress-bar -o /tmp/out.jpg \
 curl -sS "http://<VPS_HOST_OR_IP>:<CONTROL_HTTP_PORT>/health"
 ```
 
-Example host **`libp2p.le-space.de`**, control port **88**:  
-`http://libp2p.le-space.de:88/ipfs/bafy...`
+Example host **`relay.seidenwege.com`**, control port **443** via reverse proxy or **8008** locally:  
+`https://relay.seidenwege.com/ipfs/bafy...`
 
 4. **Success:** laptop stderr shows **`[laptop-provide]`** `connection:open` **outbound**; VPS journal shows **inbound** `connection:open` and **`[ipfs-gateway] cat done`** with **`bytes=`** matching the file size. **`curl`** exits 0 and the output file grows.
 
@@ -223,7 +223,7 @@ RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_QUIC_PORT=5000 RELAY_WEBRTC_PORT=90
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `RELAY_TCP_PORT` | `9091` | TCP listen port (Nym: **81** is in `*:80-81`) |
+| `RELAY_TCP_PORT` | `9091` | TCP listen port (for current Nym-friendly deployments, use **8443**) |
 | `RELAY_WS_PORT` | `9092` | WebSocket listen port (Nym: **8080** is allowed) |
 | `RELAY_QUIC_PORT` | `5000` | UDP port for **QUIC** `/quic-v1` (Nym: **5000–5005** allowed) |
 | `RELAY_WEBRTC_PORT` | `9093` | UDP for **WebRTC-Direct** (Nym: **3478–3484** allowed) |
@@ -234,7 +234,7 @@ RELAY_TCP_PORT=9091 RELAY_WS_PORT=9092 RELAY_QUIC_PORT=5000 RELAY_WEBRTC_PORT=90
 | `RELAY_AUTO_TLS` | unset | Set to **`1`** to enable **`@ipshipyard/libp2p-auto-tls`** (needs **`RELAY_AUTO_TLS_DATASTORE_PATH`**). |
 | `RELAY_AUTO_TLS_DATASTORE_PATH` | `./libp2p-autotls-data` | Writable directory for LevelDB (certs). Use e.g. **`/var/lib/helia-connectivity-lab/libp2p-datastore`** on a VPS. |
 | `RELAY_AUTO_TLS_STAGING` | unset | Set to **`1`** for Let’s Encrypt **staging** ACME. |
-| `RELAY_APPEND_ANNOUNCE` | unset | Comma-separated multiaddrs **without spaces** to **append** as announced addresses (e.g. public **`/ip4/x/tcp/81`** and **`/ip4/x/tcp/8443/ws`** when the process listens on loopback behind port forwarding). Helps **`GET /status`** and **AutoTLS** see a publicly dialable WS address. **WebRTC-Direct:** the relay often lists WebRTC only on **`/ip4/127.0.0.1/udp/…/webrtc-direct/certhash/…`**; browsers cannot dial that. Copy that line, replace **`127.0.0.1`** with your VPS public IPv4 (keep **`certhash`** and **`/p2p/…`** unchanged), and add it here so **gossipsub peer discovery** and **`GET /status`** expose a public WebRTC multiaddr. |
+| `RELAY_APPEND_ANNOUNCE` | unset | Comma-separated multiaddrs **without spaces** to **append** as announced addresses (e.g. public **`/ip4/x/tcp/8443`** and **`/ip4/x/tcp/8080/ws`** when the process listens on loopback behind port forwarding). Helps **`GET /status`** and **AutoTLS** see a publicly dialable WS address. **WebRTC-Direct:** the relay often lists WebRTC only on **`/ip4/127.0.0.1/udp/…/webrtc-direct/certhash/…`**; browsers cannot dial that. Copy that line, replace **`127.0.0.1`** with your VPS public IPv4 (keep **`certhash`** and **`/p2p/…`** unchanged), and add it here so **gossipsub peer discovery** and **`GET /status`** expose a public WebRTC multiaddr. |
 | `RELAY_DEBUG` | unset | Appended to **`DEBUG`** before startup. Examples: **`libp2p:circuit-relay*`**, **`libp2p:gossipsub*`** (logs as `libp2p:gossipsub`), **`libp2p:auto-tls`**. Combine with commas (sample unit includes circuit-relay + gossipsub + `gossipsub:*`). Reservation **`[relay-reservation]`** lines are independent of **`DEBUG`**. |
 
 On start, the server prints **PeerId** and **dialable multiaddrs**. Pick the line that matches the transport you want to test (TCP, `/ws`, **`/tls/ws`** if AutoTLS has run, or `/webrtc-direct/.../certhash/...`).
@@ -306,7 +306,7 @@ npm run test:transports -- "run-without-vpn" --out ./transport-runs.txt
 npm run test:transports -- "run-with-nym-vpn" --out ./transport-runs.txt
 ```
 
-Requires server ports matching your deployment (e.g. Nym-friendly **81 / 8080 / 5000 / 3478** from [deploy/helia-connectivity-lab.service](deploy/helia-connectivity-lab.service)).
+Requires server ports matching your deployment (e.g. Nym-friendly **8443 / 8080 / 5000 / 3478** from [deploy/helia-connectivity-lab.service](deploy/helia-connectivity-lab.service)).
 
 ### VPN on vs off (run on your laptop)
 
@@ -317,7 +317,7 @@ chmod +x scripts/run-vpn-compare-matrix.sh
 ./scripts/run-vpn-compare-matrix.sh
 ```
 
-The script prints when to turn **Nym ON** (wait 50s, then first run **`with-nym-vpn`**) and when to turn it **OFF** (wait 35s, then **`without-vpn`**). It fetches **`GET /status` over SSH** on **`RELAY_CTRL_PORT`** (default **88**). Override **`RELAY_SSH`**, **`RELAY_DIAL_HOST`**, **`TRANSPORT_RUNS`**, **`RELAY_CTRL_PORT`** if needed.
+The script prints when to turn **Nym ON** (wait 50s, then first run **`with-nym-vpn`**) and when to turn it **OFF** (wait 35s, then **`without-vpn`**). It fetches **`GET /status` over SSH** on **`RELAY_CTRL_PORT`** (default **8008**). Override **`RELAY_SSH`**, **`RELAY_DIAL_HOST`**, **`TRANSPORT_RUNS`**, **`RELAY_CTRL_PORT`** if needed.
 
 **`--dial`** is always the **relay server** address (same idea as **`RELAY_DIAL_HOST`** in the shell script). To see **your** public IP manually: `curl -sS https://api.ipify.org` (or add **`--show-egress-ip`** to the matrix so it’s written into the report).
 
@@ -385,18 +385,41 @@ npm run test:helia:local
 After a **remote** Helia/libp2p peer holds the data, fetch by **full multiaddr** + **CID**:
 
 ```bash
-npm run test:helia:remote -- '/ip4/95.217.163.72/tcp/81/p2p/12D3KooW...' bafkrei...
+npm run test:helia:remote -- '/ip4/95.217.163.72/tcp/8443/p2p/12D3KooW...' bafkrei...
 ```
 
 The **relay process** embeds **Helia** on the **same** libp2p stack as echo/bulk. Step-by-step **laptop to VPS** test (**`helia:laptop-provide`**, **`curl /ipfs/<cid>`**, **journalctl**) is in [Laptop to VPS: Helia file over HTTP and bitswap](#laptop-to-vps-helia-file-over-http-and-bitswap) and [Viewing logs on the VPS](#viewing-logs-on-the-vps). For a full pinning product, **`orbitdb-relay-pinner`** remains the richer reference.
 
+## Browser PWA
+
+The browser app in **`apps/pwa`** is already beyond “roadmap” status.
+
+- **Stack:** **Svelte 5** + **Vite 8** + **`vite-plugin-pwa`** with a generated manifest / service worker for production builds.
+- **Commands:** **`npm run pwa:dev`**, **`npm run pwa:check`**, **`npm run pwa:build`**.
+- **Env:** set **`VITE_RELAY_HTTP_BASE`** (see [apps/pwa/.env.example](apps/pwa/.env.example)).
+- **Verified UI capabilities:** relay **`GET /health`** / **`GET /status`** with optional token, relay multiaddr table with public-address filtering plus custom rows, manual **echo** + **bulk** tests, browser libp2p node + own multiaddrs, **gossipsub / pubsub peer discovery** with topic sync + drift warning, **WebRTC-filtered auto-dial**, relay reservation error banner, **Helia add**, and relay **`GET /ipfs/<cid>`** fetch.
+- **Browser transport scope:** the PWA can dial **WebSocket / WSS** and **WebRTC** multiaddrs. Raw **TCP** and **QUIC** remain Node-only in this app.
+- **PWA wiring:** the app registers the service worker on startup and the production build emits **`sw.js`** / **`manifest.webmanifest`**.
+
+## Cleanup Candidates
+
+- Replace or remove the stock template doc in **`apps/pwa/README.md`**; it still describes the default Vite/Svelte starter instead of this lab app.
+- Remove unused starter assets if you do not plan to use them: **`apps/pwa/src/assets/svelte.svg`**, **`apps/pwa/src/assets/vite.svg`**, **`apps/pwa/src/assets/hero.png`**, **`apps/pwa/public/icons.svg`**.
+- The current **`npm run pwa:build`** succeeds, but Vite warns that the main JS chunk is large (~**1.4 MiB** minified). If startup size matters, split the heavy libp2p / Helia paths.
+
 ## Roadmap
 
-1. **Phase 1 (this repo):** libp2p dial + stream echo + **bulk** sustained transfer; relay server enabled; TCP, WS, QUIC, WebRTC-Direct.
+### Completed in Repo
+
+1. **Phase 1:** libp2p dial + stream echo + **bulk** sustained transfer; relay server enabled; TCP, WS, QUIC, WebRTC-Direct.
 2. **Phase 1b:** **Done in repo** — **`@chainsafe/libp2p-quic@1.1.8`** + `/udp/.../quic-v1`. Optional future: **`@chainsafe/libp2p-quic@2.x`** if you migrate to **libp2p 3.x**.
 3. **Phase 2:** **Done in repo** — Helia **5.3** + `@helia/unixfs` **5.1**: **2A** local round-trip; **2B** remote `cat` CLI; **relay + Helia** in one process; optional **`GET /ipfs/<cid>`** HTTP(S) gateway.
-4. **Phase 3:** Hardening / ops (rate limits, auth on `/ipfs`, metrics, persistent blockstore if needed).
-5. **Phase 4:** Browser bundle (e.g. Vite) with WebSockets/WebRTC; same echo or `/ipfs` flow with CORS on the HTTP API.
+4. **Phase 4:** **Done in repo** — browser PWA in **`apps/pwa`** with **WebSocket/WebRTC** dialing, echo + bulk, relay status / health integration, pubsub peer discovery, Helia add, and relay **`GET /ipfs/<cid>`** fetch.
+
+### Next
+
+1. **Phase 3:** Hardening / ops (rate limits, auth on **`/ipfs`**, metrics, persistent blockstore if needed).
+2. **Polish / cleanup:** replace the PWA starter docs, prune unused starter assets, and reduce the browser bundle size if cold-start performance becomes important.
 
 ## License
 

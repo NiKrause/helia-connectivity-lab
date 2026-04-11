@@ -4,6 +4,8 @@ import https from 'node:https'
 import { unixfs } from '@helia/unixfs'
 import { CID } from 'multiformats/cid'
 import type { RelayRuntime } from './relay-runtime.js'
+import { localHttpOrigins, primaryHttpOrigin } from './http-listen-urls.js'
+import { parseIpfsRequest, tryServePinnedCidHttp } from './pinning-http.js'
 
 /** Shared handler options (timeout, logging). */
 export type IpfsGatewayHandlerConfig = {
@@ -68,8 +70,106 @@ export function clientLabel(req: http.IncomingMessage): string {
   return p ? `${a}:${p}` : a || '(unknown)'
 }
 
+function sendGatewayError(res: http.ServerResponse, status: number, error: string): void {
+  res.statusCode = status
+  res.setHeader('Content-Type', 'application/json')
+  res.setHeader('Cache-Control', 'private, no-store')
+  res.end(JSON.stringify({ error }))
+}
+
+function gatewayErrorStatus(error: unknown): { status: number; message: string } {
+  const message = error instanceof Error ? error.message : String(error)
+  if (message.toLowerCase().includes('abort')) {
+    return { status: 504, message: 'Timed out while fetching CID over libp2p' }
+  }
+  if (
+    message.includes('ERR_NOT_FOUND') ||
+    message.toLowerCase().includes('not found') ||
+    message.toLowerCase().includes('missing block') ||
+    message.toLowerCase().includes('no links named')
+  ) {
+    return { status: 404, message: 'Content not found on relay or network' }
+  }
+  return { status: 502, message }
+}
+
+async function tryServeRuntimeUnixfsCat(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  runtime: RelayRuntime,
+  cfg: IpfsGatewayHandlerConfig
+): Promise<boolean> {
+  const parsed = parseIpfsRequest(req)
+  if (!parsed.handled) return false
+  if (!parsed.ok) {
+    sendGatewayError(res, parsed.status, parsed.error)
+    return true
+  }
+  if (runtime.helia == null) {
+    sendGatewayError(res, 503, 'Helia gateway is not available')
+    return true
+  }
+
+  let cid: CID
+  try {
+    cid = CID.parse(parsed.cidStr)
+  } catch {
+    sendGatewayError(res, 400, 'Invalid CID')
+    return true
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(new Error('gateway timeout')), cfg.catTimeoutMs)
+  const fsApi = unixfs(runtime.helia)
+  const unixfsOpts = {
+    signal: controller.signal,
+    ...(parsed.pathWithin ? { path: parsed.pathWithin } : {}),
+  }
+
+  try {
+    const stat = await fsApi.stat(cid, unixfsOpts)
+    if (stat.type === 'directory') {
+      sendGatewayError(
+        res,
+        400,
+        'Directory download is not supported; specify a file path under the CID'
+      )
+      return true
+    }
+
+    res.statusCode = 200
+    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Cache-Control', 'private, no-store')
+
+    for await (const chunk of fsApi.cat(cid, unixfsOpts)) {
+      if (!res.write(chunk)) {
+        await new Promise<void>((resolve, reject) => {
+          res.once('drain', resolve)
+          res.once('error', reject)
+        })
+      }
+    }
+    res.end()
+    return true
+  } catch (error) {
+    const mapped = gatewayErrorStatus(error)
+    if (!res.headersSent) {
+      sendGatewayError(res, mapped.status, mapped.message)
+    } else {
+      try {
+        res.destroy(error instanceof Error ? error : undefined)
+      } catch {
+        // ignore
+      }
+    }
+    return true
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 /**
- * GET /ipfs/<cid> only. Returns true if the request was handled (caller should stop routing).
+ * GET /ipfs/<cid> or /ipfs/<cid>/<path...>. Returns true if the request was handled.
  */
 export async function tryServeIpfsCat(
   req: http.IncomingMessage,
@@ -77,85 +177,85 @@ export async function tryServeIpfsCat(
   getRuntime: () => RelayRuntime,
   cfg: IpfsGatewayHandlerConfig
 ): Promise<boolean> {
-  if (req.method !== 'GET') {
-    return false
-  }
   const pathname = (req.url ?? '/').split('?')[0] || '/'
-  const m = pathname.match(/^\/ipfs\/([^/]+)\/?$/)
-  if (!m) {
-    return false
-  }
-
-  let cid: CID
-  try {
-    cid = CID.parse(m[1])
-  } catch {
-    if (cfg.log) {
-      console.log(`[ipfs-gateway] invalid CID path segment  client=${clientLabel(req)}  raw=${m[1]?.slice(0, 80)}`)
-    }
-    res.statusCode = 400
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-    res.end('Invalid CID')
-    return true
-  }
-
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), cfg.catTimeoutMs)
-  req.on('close', () => {
-    if (!req.complete) controller.abort()
-  })
-
+  if (!pathname.startsWith('/ipfs/')) return false
   const t0 = Date.now()
+  const rawTarget = pathname.slice('/ipfs/'.length).split('/')[0] || '(missing)'
   let sent = 0
   let nextProgressAt = cfg.logProgressBytes
+  const origWrite = res.write.bind(res)
 
   try {
     if (cfg.log) {
       console.log(
-        `[ipfs-gateway] cat start  cid=${cid.toString()}  client=${clientLabel(req)}  timeoutMs=${cfg.catTimeoutMs}`
+        `[ipfs-gateway] cat start  target=${rawTarget.slice(0, 120)}  client=${clientLabel(req)}`
       )
     }
-
-    const helia = getRuntime().helia
-    const fsapi = unixfs(helia)
-    res.statusCode = 200
-    res.setHeader('Content-Type', 'application/octet-stream')
-    res.setHeader('Cache-Control', 'private, no-store')
-    res.setHeader('X-Content-Cid', cid.toString())
-
-    for await (const chunk of fsapi.cat(cid, { signal: controller.signal })) {
-      if (!res.write(chunk)) {
-        await new Promise<void>((resolve, reject) => {
-          res.once('drain', resolve)
-          res.once('error', reject)
-        })
+    res.write = ((chunk: unknown, encoding?: unknown, cb?: unknown) => {
+      let len = 0
+      if (chunk instanceof Uint8Array || Buffer.isBuffer(chunk)) {
+        len = chunk.length
+      } else if (typeof chunk === 'string') {
+        len = Buffer.byteLength(chunk, typeof encoding === 'string' ? (encoding as BufferEncoding) : undefined)
       }
-      sent += chunk.length
+      sent += len
       if (cfg.log && cfg.logProgressBytes > 0 && sent >= nextProgressAt) {
         console.log(
-          `[ipfs-gateway] cat progress  cid=${cid.toString()}  bytes=${sent}  elapsedMs=${Date.now() - t0}`
+          `[ipfs-gateway] cat progress  target=${rawTarget.slice(0, 120)}  bytes=${sent}  elapsedMs=${Date.now() - t0}`
         )
         while (nextProgressAt <= sent) {
           nextProgressAt += cfg.logProgressBytes
         }
       }
+      return (origWrite as (...args: unknown[]) => boolean)(chunk, encoding, cb)
+    }) as typeof res.write
+
+    const runtime = getRuntime()
+    const parsed = parseIpfsRequest(req)
+    if (!parsed.handled) {
+      return false
     }
-    res.end()
+    if (!parsed.ok) {
+      sendGatewayError(res, parsed.status, parsed.error)
+      return true
+    }
+
+    const pinnedResult =
+      runtime.pinning?.streamPinnedCid == null
+        ? null
+        : await runtime.pinning.streamPinnedCid(parsed.cidStr, parsed.pathWithin)
+    if (pinnedResult?.ok) {
+      res.statusCode = 200
+      res.setHeader('Content-Type', pinnedResult.contentType || 'application/octet-stream')
+      res.setHeader('Cache-Control', 'private, no-store')
+      for await (const chunk of pinnedResult.chunks) {
+        if (!res.write(chunk)) {
+          await new Promise<void>((resolve, reject) => {
+            res.once('drain', resolve)
+            res.once('error', reject)
+          })
+        }
+      }
+      res.end()
+    } else if (pinnedResult == null || pinnedResult.status === 404) {
+      await tryServeRuntimeUnixfsCat(req, res, runtime, cfg)
+    } else {
+      sendGatewayError(res, pinnedResult.status, pinnedResult.error)
+    }
     if (cfg.log) {
-      console.log(`[ipfs-gateway] cat done  cid=${cid.toString()}  bytes=${sent}  totalMs=${Date.now() - t0}`)
+      console.log(`[ipfs-gateway] cat done  target=${rawTarget.slice(0, 120)}  bytes=${sent}  totalMs=${Date.now() - t0}`)
     }
   } catch (e: unknown) {
-    const aborted = e instanceof Error && e.name === 'AbortError'
     if (cfg.log) {
-      const msg = aborted ? 'aborted (timeout or client closed)' : e instanceof Error ? e.message : String(e)
+      const msg = e instanceof Error ? e.message : String(e)
       console.log(
-        `[ipfs-gateway] cat error  cid=${cid.toString()}  bytesSent=${sent}  elapsedMs=${Date.now() - t0}  ${msg}`
+        `[ipfs-gateway] cat error  target=${rawTarget.slice(0, 120)}  bytesSent=${sent}  elapsedMs=${Date.now() - t0}  ${msg}`
       )
     }
     if (!res.headersSent) {
-      res.statusCode = aborted ? 504 : 500
+      res.statusCode = 500
       res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-      res.end(aborted ? 'Timeout or client closed' : (e instanceof Error ? e.message : String(e)))
+      res.end(e instanceof Error ? e.message : String(e))
     } else {
       try {
         res.destroy()
@@ -164,7 +264,7 @@ export async function tryServeIpfsCat(
       }
     }
   } finally {
-    clearTimeout(timeout)
+    res.write = origWrite
   }
 
   return true
@@ -196,7 +296,7 @@ export function startIpfsHttpGateway(
   const portOk = feature.standalonePort > 0
   if (!portOk) {
     console.warn(
-      '[ipfs-gateway] RELAY_IPFS_GATEWAY is set but control HTTP is disabled — set RELAY_IPFS_HTTP_PORT for a standalone gateway, or enable RELAY_CONTROL_HTTP_PORT + RELAY_CONTROL_TOKEN to share port 88.'
+      '[ipfs-gateway] RELAY_IPFS_GATEWAY is set but control HTTP is disabled — set RELAY_IPFS_HTTP_PORT for a standalone gateway, or enable RELAY_CONTROL_HTTP_PORT + RELAY_CONTROL_TOKEN to share the control HTTP port.'
     )
     return { close: async () => {} }
   }
@@ -245,9 +345,17 @@ export function startIpfsHttpGateway(
 
   server.listen(feature.standalonePort, feature.host, () => {
     const scheme = feature.tls ? 'https' : 'http'
+    const origin = primaryHttpOrigin(feature.host, feature.standalonePort, scheme)
+    const localOrigins = localHttpOrigins(feature.host, feature.standalonePort, scheme)
     console.log(
-      `IPFS HTTP gateway (standalone) on ${scheme}://${feature.host}:${feature.standalonePort} — same as control when possible; this is fallback only.`
+      `IPFS HTTP gateway (standalone) on ${origin} — same as control when possible; this is fallback only.`
     )
+    if (localOrigins.length > 0) {
+      console.log('  Health:')
+      for (const url of localOrigins) {
+        console.log(`   ${url}/health`)
+      }
+    }
     console.log(`  GET /ipfs/<cid>  (streams unixfs.cat over libp2p / bitswap)`)
     console.log('  GET /health')
     if (cfg.log) {

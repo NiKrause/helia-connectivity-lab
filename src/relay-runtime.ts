@@ -1,11 +1,15 @@
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createLibp2p } from 'libp2p'
 import type { Libp2p } from 'libp2p'
 import type { PrivateKey } from '@libp2p/interface'
-import { MemoryBlockstore } from 'blockstore-core'
-import { MemoryDatastore } from 'datastore-core'
+import type { Helia } from '@helia/interface'
 import { LevelDatastore } from 'datastore-level'
-import { createHelia, type HeliaLibp2p } from 'helia'
+import { LevelBlockstore } from 'blockstore-level'
+import {
+  orbitdbReplicationService,
+  type OrbitdbReplicationServiceApi,
+} from 'orbitdb-relay-pinner'
 import {
   createServerLibp2pOptions,
   readRelayAutoTlsEnabled,
@@ -17,14 +21,42 @@ import { BULK_MAX_CHUNK_BYTES } from './bulk-constants.js'
 import { CONNECTIVITY_BULK_PROTOCOL, CONNECTIVITY_ECHO_PROTOCOL } from './protocol.js'
 import { ByteStreamReader, encodeFrame, readFramedChunk } from './stream-binary.js'
 import { readLine, writeLine } from './stream-line.js'
+import type { RelayPinningHandlers } from './pinning-http.js'
 
-export type RelayHelia = HeliaLibp2p<Libp2p>
+type Libp2pWithOrbitdbReplication = Libp2p & {
+  services: Libp2p['services'] & {
+    orbitdbReplication: OrbitdbReplicationServiceApi & {
+      ipfs?: Helia | null
+    }
+  }
+}
 
 export type RelayRuntime = {
-  libp2p: Libp2p
-  helia: RelayHelia
+  libp2p: Libp2pWithOrbitdbReplication
+  helia: Helia | null
+  pinning: RelayPinningHandlers | null
   listenOverrides: RelayListenOverrides
   stop: () => Promise<void>
+}
+
+type RelayStoragePaths = {
+  root: string
+  datastore: string
+  blockstore: string
+  orbitdb: string
+}
+
+function readRelayStoragePaths(): RelayStoragePaths {
+  const configuredRoot =
+    process.env.RELAY_DATASTORE_PATH?.trim() ||
+    process.env.DATASTORE_PATH?.trim() ||
+    join(process.cwd(), 'relay-data')
+  return {
+    root: configuredRoot,
+    datastore: join(configuredRoot, 'ipfs', 'data'),
+    blockstore: join(configuredRoot, 'ipfs', 'blocks'),
+    orbitdb: join(configuredRoot, 'orbitdb'),
+  }
 }
 
 function attachBulkHandler(libp2p: Libp2p): void {
@@ -78,53 +110,68 @@ function attachEchoHandler(libp2p: Libp2p): void {
 }
 
 export async function startRelayRuntime(privateKey: PrivateKey, overrides?: RelayListenOverrides): Promise<RelayRuntime> {
-  let levelDatastore: LevelDatastore | null = null
+  const storage = readRelayStoragePaths()
+  await Promise.all([
+    mkdir(storage.datastore, { recursive: true }),
+    mkdir(storage.blockstore, { recursive: true }),
+    mkdir(storage.orbitdb, { recursive: true }),
+  ])
+
+  const levelDatastore = new LevelDatastore(storage.datastore)
+  const levelBlockstore = new LevelBlockstore(storage.blockstore)
+  await levelDatastore.open()
+  await levelBlockstore.open()
+  console.log(`[relay] persistent datastore root: ${storage.root}`)
   if (readRelayAutoTlsEnabled()) {
-    const raw = process.env.RELAY_AUTO_TLS_DATASTORE_PATH?.trim()
-    const dsPath = raw || join(process.cwd(), 'libp2p-autotls-data')
-    levelDatastore = new LevelDatastore(dsPath)
-    await levelDatastore.open()
-    console.log(`[relay] RELAY_AUTO_TLS: Level datastore at ${dsPath}`)
+    console.log(`[relay] RELAY_AUTO_TLS shares datastore ${storage.datastore}`)
   }
 
+  const baseLibp2pOptions = createServerLibp2pOptions(privateKey, overrides, levelDatastore) as Record<string, unknown>
   const libp2pOptions = {
-    ...(createServerLibp2pOptions(privateKey, overrides, levelDatastore ?? undefined) as Record<string, unknown>),
+    ...baseLibp2pOptions,
+    services: {
+      ...((baseLibp2pOptions.services as Record<string, unknown> | undefined) ?? {}),
+      orbitdbReplication: orbitdbReplicationService({
+        datastore: levelDatastore,
+        blockstore: levelBlockstore,
+        orbitdbDirectory: storage.orbitdb,
+      }),
+    },
     start: false,
   } as Parameters<typeof createLibp2p>[0]
 
-  const libp2p = await createLibp2p(libp2pOptions)
+  const libp2p = (await createLibp2p(libp2pOptions)) as Libp2pWithOrbitdbReplication
   if (libp2pConnLogEnabledForRelay()) {
     attachLibp2pConnectionLogging(libp2p, '[relay libp2p]')
     console.log('[relay libp2p] connection logging on (LIBP2P_CONN_LOG or RELAY_LIBP2P_CONN_LOG)')
   }
   attachEchoHandler(libp2p)
   attachBulkHandler(libp2p)
-
-  const helia = await createHelia<typeof libp2p>({
-    libp2p,
-    blockstore: new MemoryBlockstore(),
-    datastore: new MemoryDatastore(),
-    start: false,
-  })
-  await helia.start()
+  await libp2p.start()
   attachRelayReservationConsoleLog(libp2p)
+  const pinning = libp2p.services.orbitdbReplication.createPinningHttpHandlers()
+  const helia = libp2p.services.orbitdbReplication.ipfs ?? null
 
   return {
     libp2p,
     helia,
+    pinning,
     listenOverrides: overrides ?? {},
     stop: async () => {
       try {
-        await helia.stop()
+        await libp2p.stop()
       } catch {
         // ignore
       }
-      if (levelDatastore) {
-        try {
-          await levelDatastore.close()
-        } catch {
-          // ignore
-        }
+      try {
+        await levelBlockstore.close()
+      } catch {
+        // ignore
+      }
+      try {
+        await levelDatastore.close()
+      } catch {
+        // ignore
       }
     },
   }
@@ -149,6 +196,6 @@ export function logRelayBanner(libp2p: Libp2p): void {
   )
   console.log('Protocols:', CONNECTIVITY_ECHO_PROTOCOL, CONNECTIVITY_BULK_PROTOCOL)
   console.log(
-    'Helia: bitswap + unixfs on the same libp2p node (GET /ipfs/<cid> when RELAY_IPFS_GATEWAY=1 on control HTTP, or standalone RELAY_IPFS_HTTP_PORT).'
+    'OrbitDB replication + Helia pinning are mounted on the same libp2p node (GET /ipfs/<cid> and /pinning/* when enabled on control HTTP).'
   )
 }
