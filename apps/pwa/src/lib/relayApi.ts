@@ -99,6 +99,33 @@ function synthesizeStatusFromMultiaddrs(base: string, addrs: string[]): RelaySta
   }
 }
 
+type RelayMultiaddrsResponse = {
+  multiaddrs?: string[]
+  all?: string[]
+  peerId?: string | null
+  error?: string
+}
+
+function multiaddrsFromFallbackJson(payload: RelayMultiaddrsResponse): string[] {
+  if (Array.isArray(payload.multiaddrs)) return payload.multiaddrs
+  if (Array.isArray(payload.all)) return payload.all
+  return []
+}
+
+function synthesizeStatusFromFallback(base: string, payload: RelayMultiaddrsResponse): RelayStatus | null {
+  const addrs = multiaddrsFromFallbackJson(payload)
+  if (addrs.length === 0) return null
+  const synthesized = synthesizeStatusFromMultiaddrs(base, addrs)
+  if (synthesized != null) return synthesized
+  const peerId = typeof payload.peerId === 'string' ? payload.peerId.trim() : ''
+  if (!peerId) return null
+  return {
+    ok: true,
+    peerId,
+    multiaddrs: normalizeRelayMultiaddrs(base, addrs),
+  }
+}
+
 export function isLocalRelayHttpBase(base: string): boolean {
   const trimmed = base.trim()
   if (trimmed.startsWith('/')) return true
@@ -170,7 +197,7 @@ export async function fetchStatus(
 
     try {
       const fallback = await fetch(`${base}/multiaddrs`, { headers })
-      const fallbackJson = (await fallback.json()) as { multiaddrs?: string[]; peerId?: string; error?: string }
+      const fallbackJson = (await fallback.json()) as RelayMultiaddrsResponse
       if (fallback.status === 401) {
         return {
           ok: false,
@@ -178,8 +205,8 @@ export async function fetchStatus(
             'HTTP 401 — set Control token below (same as RELAY_CONTROL_TOKEN) if your relay or proxy requires auth, or deploy a build where GET /status is public.',
         }
       }
-      if (fallback.ok && Array.isArray(fallbackJson.multiaddrs) && fallbackJson.multiaddrs.length > 0) {
-        const synthesized = synthesizeStatusFromMultiaddrs(base, fallbackJson.multiaddrs)
+      if (fallback.ok) {
+        const synthesized = synthesizeStatusFromFallback(base, fallbackJson)
         if (synthesized != null) {
           return { ok: true, data: synthesized }
         }
