@@ -1,5 +1,7 @@
 # helia-connectivity-lab
 
+[![CI](https://github.com/NiKrause/helia-connectivity-lab/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NiKrause/helia-connectivity-lab/actions/workflows/ci.yml?query=branch%3Amain)
+
 Phase 1: minimal **libp2p** connectivity check between a **relay + echo server** and a **desktop CLI client**. The server runs **circuit relay v2** (`circuitRelayServer`) and two custom protocols: **`/connectivity-echo/1.0.0`** (one-line echo) and **`/connectivity-bulk/1.0.0`** (length-prefixed random payloads echoed back for sustained load tests).
 
 The same process also runs **Helia 5** on that **one** libp2p node (bitswap + in-memory blockstore). Optionally expose **`GET /ipfs/<cid>`** over HTTP(S) so the VPS can **`unixfs.cat`** a CID from the network (e.g. a laptop that dialed in on TCP / WS / QUIC / WebRTC like the rest of the lab).
