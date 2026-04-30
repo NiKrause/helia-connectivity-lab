@@ -1,3 +1,7 @@
+packages:
+  - .
+  - apps/pwa
+
 onlyBuiltDependencies:
   - '@ipshipyard/node-datachannel'
   - '@le-space/orbitdb-identity-provider-webauthn-did'
