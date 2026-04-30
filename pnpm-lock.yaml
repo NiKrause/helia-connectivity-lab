@@ -20,6 +20,9 @@ importers:
       '@chainsafe/libp2p-yamux':
         specifier: ^7.0.4
         version: 7.0.4
+      '@helia/interface':
+        specifier: ^5.4.0
+        version: 5.4.0
       '@helia/unixfs':
         specifier: 5.1.0
         version: 5.1.0
@@ -38,6 +41,9 @@ importers:
       '@libp2p/identify':
         specifier: ^3.0.39
         version: 3.0.39
+      '@libp2p/interface':
+        specifier: ^3.1.1
+        version: 3.2.0
       '@libp2p/keychain':
         specifier: ^5.2.1
         version: 5.2.9
@@ -74,6 +80,9 @@ importers:
       helia:
         specifier: 5.3.0
         version: 5.3.0(react-native@0.85.1(@babel/core@7.29.0)(react@19.2.5))
+      interface-datastore:
+        specifier: ^8.3.1
+        version: 8.3.2
       libp2p:
         specifier: ^2.10.0
         version: 2.10.0
