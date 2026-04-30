@@ -7,8 +7,12 @@ import type { Helia } from '@helia/interface'
 import { LevelDatastore } from 'datastore-level'
 import { LevelBlockstore } from 'blockstore-level'
 import {
+  connectivityDebugProtocolsService,
+  CONNECTIVITY_BULK_PROTOCOL,
+  CONNECTIVITY_ECHO_PROTOCOL,
   orbitdbReplicationService,
   type OrbitdbReplicationServiceApi,
+  type PinningHttpHandlers,
 } from 'orbitdb-relay-pinner'
 import {
   createServerLibp2pOptions,
@@ -17,11 +21,6 @@ import {
 } from './libp2p-server-config.js'
 import { attachLibp2pConnectionLogging, libp2pConnLogEnabledForRelay } from './libp2p-connection-log.js'
 import { attachRelayReservationConsoleLog } from './relay-reservation-console.js'
-import { BULK_MAX_CHUNK_BYTES } from './bulk-constants.js'
-import { CONNECTIVITY_BULK_PROTOCOL, CONNECTIVITY_ECHO_PROTOCOL } from './protocol.js'
-import { ByteStreamReader, encodeFrame, readFramedChunk } from './stream-binary.js'
-import { readLine, writeLine } from './stream-line.js'
-import type { RelayPinningHandlers } from './pinning-http.js'
 
 type Libp2pWithOrbitdbReplication = Libp2p & {
   services: Libp2p['services'] & {
@@ -34,7 +33,7 @@ type Libp2pWithOrbitdbReplication = Libp2p & {
 export type RelayRuntime = {
   libp2p: Libp2pWithOrbitdbReplication
   helia: Helia | null
-  pinning: RelayPinningHandlers | null
+  pinning: PinningHttpHandlers | null
   listenOverrides: RelayListenOverrides
   stop: () => Promise<void>
 }
@@ -57,56 +56,6 @@ function readRelayStoragePaths(): RelayStoragePaths {
     blockstore: join(configuredRoot, 'ipfs', 'blocks'),
     orbitdb: join(configuredRoot, 'orbitdb'),
   }
-}
-
-function attachBulkHandler(libp2p: Libp2p): void {
-  libp2p.handle(CONNECTIVITY_BULK_PROTOCOL, async ({ stream }) => {
-    try {
-      const reader = new ByteStreamReader(stream)
-      await stream.sink(
-        (async function* () {
-          for (;;) {
-            let payload: Uint8Array
-            try {
-              payload = await readFramedChunk(reader, BULK_MAX_CHUNK_BYTES)
-            } catch (e: unknown) {
-              const msg = e instanceof Error ? e.message : String(e)
-              if (msg.includes('stream ended')) return
-              throw e
-            }
-            if (payload.length === 0) return
-            yield encodeFrame(payload)
-          }
-        })()
-      )
-    } catch (err) {
-      console.error('connectivity-bulk handler error:', err)
-    } finally {
-      try {
-        await stream.close()
-      } catch {
-        // ignore
-      }
-    }
-  })
-}
-
-function attachEchoHandler(libp2p: Libp2p): void {
-  libp2p.handle(CONNECTIVITY_ECHO_PROTOCOL, async ({ stream }) => {
-    try {
-      const line = await readLine(stream)
-      const reply = line.length > 0 ? `echo:${line}` : 'echo:(empty)'
-      await writeLine(stream, reply)
-    } catch (err) {
-      console.error('connectivity-echo handler error:', err)
-    } finally {
-      try {
-        await stream.close()
-      } catch {
-        // ignore
-      }
-    }
-  })
 }
 
 export async function startRelayRuntime(privateKey: PrivateKey, overrides?: RelayListenOverrides): Promise<RelayRuntime> {
@@ -136,6 +85,15 @@ export async function startRelayRuntime(privateKey: PrivateKey, overrides?: Rela
         blockstore: levelBlockstore,
         orbitdbDirectory: storage.orbitdb,
       }),
+      connectivityDebugProtocols: connectivityDebugProtocolsService({
+        echo: { enabled: true },
+        bulk: {
+          enabled: true,
+          maxFrameBytes: 256 * 1024,
+          readTimeoutMs: 10_000,
+          idleTimeoutMs: 30_000,
+        },
+      }),
     },
     start: false,
   } as Parameters<typeof createLibp2p>[0]
@@ -145,8 +103,6 @@ export async function startRelayRuntime(privateKey: PrivateKey, overrides?: Rela
     attachLibp2pConnectionLogging(libp2p, '[relay libp2p]')
     console.log('[relay libp2p] connection logging on (LIBP2P_CONN_LOG or RELAY_LIBP2P_CONN_LOG)')
   }
-  attachEchoHandler(libp2p)
-  attachBulkHandler(libp2p)
   await libp2p.start()
   attachRelayReservationConsoleLog(libp2p)
   const pinning = libp2p.services.orbitdbReplication.createPinningHttpHandlers()

@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { createPinningHttpRequestHandler, isManagedPinningHttpPath } from 'orbitdb-relay-pinner'
 import type { RelayRuntime } from './relay-runtime.js'
 import { logRelayBanner, startRelayRuntime } from './relay-runtime.js'
 import type { PrivateKey } from '@libp2p/interface'
@@ -7,13 +8,8 @@ import {
   type RelayListenOverrides,
 } from './libp2p-server-config.js'
 import { filterMultiaddrsForStatusRequest } from './public-multiaddr-filter.js'
-import {
-  clientLabel,
-  readIpfsGatewayFeatureConfig,
-  tryServeIpfsCat,
-} from './ipfs-http-gateway.js'
+import { readIpfsGatewayFeatureConfig } from './ipfs-http-gateway.js'
 import { localHttpOrigins, primaryHttpOrigin } from './http-listen-urls.js'
-import { tryServePinningHttp } from './pinning-http.js'
 
 function readControlConfig() {
   const port = Number(process.env.RELAY_CONTROL_HTTP_PORT || process.env.CONTROL_HTTP_PORT || '')
@@ -147,11 +143,22 @@ export function startControlHttpServer(opts: {
   }
 
   const ipfsFeature = readIpfsGatewayFeatureConfig()
-  const ipfsHandlerCfg = {
-    catTimeoutMs: ipfsFeature.catTimeoutMs,
-    log: ipfsFeature.log,
-    logProgressBytes: ipfsFeature.logProgressBytes,
-  }
+  const corsOriginRaw = process.env.RELAY_CONTROL_CORS_ORIGIN?.trim() || '*'
+  const sharedPinningHandler = createPinningHttpRequestHandler({
+    getLibp2p: () => opts.getRuntime().libp2p as never,
+    pinning: opts.getRuntime().pinning ?? undefined,
+    getHelia: () => opts.getRuntime().helia,
+    ipfsGateway: {
+      enabled: ipfsFeature.enabled,
+      fallbackMode: 'pinned-first-network-fallback',
+      catTimeoutMs: ipfsFeature.catTimeoutMs,
+    },
+    cors: {
+      origin: corsOriginRaw === '*' ? '*' : corsOriginRaw.split(',').map((value) => value.trim()).filter(Boolean),
+      allowHeaders: ['Authorization', 'Content-Type', 'X-Control-Token'],
+      maxAgeSeconds: 600,
+    },
+  })
 
   let serialQueue: Promise<unknown> = Promise.resolve()
   function runSerial<T>(fn: () => Promise<T>): Promise<T> {
@@ -199,25 +206,8 @@ export function startControlHttpServer(opts: {
       return
     }
 
-    if (req.method === 'GET' && pathname === '/health') {
-      if (ipfsFeature.enabled && ipfsFeature.log) {
-        console.log(`[ipfs-gateway] GET /health  client=${clientLabel(req)}`)
-      }
-      sendJson(
-        res,
-        200,
-        ipfsFeature.enabled
-          ? { status: 'ok', control: true, ipfsGateway: true }
-          : { status: 'ok', control: true }
-      )
-      return
-    }
-
-    if (ipfsFeature.enabled && (await tryServeIpfsCat(req, res, opts.getRuntime, ipfsHandlerCfg))) {
-      return
-    }
-
-    if (await tryServePinningHttp(req, res, opts.getRuntime().pinning)) {
+    if (isManagedPinningHttpPath(pathname)) {
+      await sharedPinningHandler(req, res)
       return
     }
 

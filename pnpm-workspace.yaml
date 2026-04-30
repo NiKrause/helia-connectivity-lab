@@ -1,0 +1,6 @@
+onlyBuiltDependencies:
+  - '@ipshipyard/node-datachannel'
+  - '@le-space/orbitdb-identity-provider-webauthn-did'
+  - cbor-extract
+  - classic-level
+  - esbuild
